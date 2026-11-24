@@ -6,21 +6,33 @@ import sys
 from .constants import (
     ACCENT_COLOR_CHOICES,
     APP_DISPLAY_NAME,
-    APPLE_DARK_BACKGROUND_PRESET,
-    APPLE_LIGHT_BACKGROUND_PRESET,
     COMMAND_MODIFIER_KEYS,
     COLOR_CHOICES,
+    COLOR_PRESETS,
     COMPACT_TV_LAYER_ALPHA,
     COMPACT_TV_LAYER_NUMBERS,
     DEFAULT_ACCENT_COLOR,
+    DEFAULT_CUSTOM_KEY_BG,
+    DEFAULT_CUSTOM_KEY_BORDER_COLOR,
+    DEFAULT_CUSTOM_MODIFIER_BG,
+    DEFAULT_CUSTOM_TEXT_COLOR,
+    DEFAULT_CUSTOM_WINDOW_BG,
     DEFAULT_DWELL_TIME_MS,
     DEFAULT_FONT_SCALE,
+    DEFAULT_FONT_WEIGHT,
     DEFAULT_INACTIVITY_DELAY_SECONDS,
     DEFAULT_INACTIVITY_FADE_OPACITY,
+    DEFAULT_KEY_BORDER_WIDTH,
     DEFAULT_KEY_RADIUS,
+    DEFAULT_KEY_SHADOW_ENABLED,
     DEFAULT_KEY_SPACING,
     DEFAULT_KEYBOARD_LAYOUT,
+    DEFAULT_WINDOW_BORDER_COLOR,
+    DEFAULT_WINDOW_BORDER_WIDTH,
     ENHANCED_BACKGROUND_PRESET,
+    FONT_WEIGHT_CHOICES,
+    FROST_LIGHT_BACKGROUND_PRESET,
+    GRAPHITE_DARK_BACKGROUND_PRESET,
     HIGH_CONTRAST_TV_BACKGROUND_PRESET,
     INPUT_TRIGGER_CHOICES,
     INPUT_TRIGGER_PRESS,
@@ -55,6 +67,7 @@ from .gtk import (
     GLib,
     Gtk,
 )
+from .icons import render_icon_image, set_button_vector_icon
 from .input_backends import EvdevUInputBackend, NullInputBackend, UInputBackend
 from .layouts import (
     build_compact_tv_alpha_cells,
@@ -64,13 +77,21 @@ from .layouts import (
     get_layout_short_label,
     load_keyboard_layouts,
 )
+from .presets import PRESET_KEYS, UserPresetManager
 from .suggestions import HunspellSuggestionEngine
 from .system_layouts import (
     SystemLayoutController,
     get_next_layout_id,
     resolve_system_entry_to_vboard_layout,
 )
-from .themes import build_theme_css
+from .themes import (
+    build_theme_css,
+    get_base_theme_colors,
+    normalize_style_variant,
+    parse_hex_rgb,
+    resolve_theme_palette,
+    rgb_to_hex,
+)
 
 
 BUG_REPORT_URL = "https://github.com/archisman-panigrahi/vboard/issues/"
@@ -402,7 +423,7 @@ class StatusNotifierTrayIcon:
             (
                 3,
                 {
-                    "label": "Touch Typing (requires app restart)",
+                    "label": "Swipe Typing",
                     "toggle-type": "checkmark",
                     "toggle-state": int(self.window.gesture_enabled),
                 },
@@ -634,14 +655,24 @@ class VirtualKeyboard(Gtk.Window):
         self.set_deletable(True)
         self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
 
+        min_geometry = Gdk.Geometry()
+        min_geometry.min_width = 420
+        min_geometry.min_height = 180
+        self.set_geometry_hints(None, min_geometry, Gdk.WindowHints.MIN_SIZE)
+
         self.connect("delete-event", self.on_delete_event)
         self.connect("map-event", self.on_map_keep_above)
         self.connect("window-state-event", self.on_window_state_changed)
         self.add_events(
-            Gdk.EventMask.BUTTON_RELEASE_MASK
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.BUTTON1_MOTION_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
             | Gdk.EventMask.LEAVE_NOTIFY_MASK
             | Gdk.EventMask.ENTER_NOTIFY_MASK
         )
+        self.connect("button-press-event", self.on_window_button_press_event)
+        self.connect("motion-notify-event", self.on_window_motion_event)
         self.connect("button-release-event", self.on_window_button_release_event)
         self.connect("leave-notify-event", self.on_window_leave_notify_event)
         self.connect("enter-notify-event", self.on_window_enter_notify_event)
@@ -649,6 +680,7 @@ class VirtualKeyboard(Gtk.Window):
         self._keep_above_timer_id = None
         self._watchdog_source = None
         self._inactivity_timer_id = None
+        self._scale_timer_id = None
         self._is_faded = False
         self._dwell_timer_id = None
         self._dwell_target = None
@@ -665,19 +697,32 @@ class VirtualKeyboard(Gtk.Window):
         self.CONFIG_DIR = os.path.expanduser("~/.config/vboard")
         self.CONFIG_FILE = os.path.join(self.CONFIG_DIR, "settings.conf")
         self.config = configparser.ConfigParser()
+        self.preset_manager = UserPresetManager(os.path.join(self.CONFIG_DIR, "presets"))
+        self.active_preset_name = ""
         self.keyboard_layouts = load_keyboard_layouts(
             os.path.join(self.CONFIG_DIR, "layouts")
         )
         self.keyboard_layout_choices = get_layout_choices(self.keyboard_layouts)
 
         self.bg_color = "0,0,0"
-        self.opacity = "0.90"
-        self.text_color = "white"
-        self.style_variant = "onboard"
+        self.opacity = "0.92"
+        self.text_color = "#F5F5F7"
+        self.style_variant = "graphite_dark"
         self.accent_color = DEFAULT_ACCENT_COLOR
         self.font_scale = DEFAULT_FONT_SCALE
+        self.font_weight = DEFAULT_FONT_WEIGHT
         self.key_corner_radius = DEFAULT_KEY_RADIUS
         self.key_spacing = DEFAULT_KEY_SPACING
+        self.key_border_width = DEFAULT_KEY_BORDER_WIDTH
+        self.window_border_width = DEFAULT_WINDOW_BORDER_WIDTH
+        self.window_border_color = DEFAULT_WINDOW_BORDER_COLOR
+        self.key_shadow_enabled = DEFAULT_KEY_SHADOW_ENABLED
+        self.use_custom_colors = False
+        self.custom_window_bg = DEFAULT_CUSTOM_WINDOW_BG
+        self.custom_key_bg = DEFAULT_CUSTOM_KEY_BG
+        self.custom_modifier_bg = DEFAULT_CUSTOM_MODIFIER_BG
+        self.custom_text_color = DEFAULT_CUSTOM_TEXT_COLOR
+        self.custom_key_border_color = DEFAULT_CUSTOM_KEY_BORDER_COLOR
         self.text_prediction_enabled = True
         self.show_media_row = False
         self.show_current_text_bar = False
@@ -706,13 +751,17 @@ class VirtualKeyboard(Gtk.Window):
         self.modifiers = {mod_key: False for mod_key in MODIFIER_KEYS}
         self.locked_modifiers = {mod_key: False for mod_key in MODIFIER_KEYS}
         self.color_map = dict(COLOR_CHOICES)
-        if self.width != 0:
-            self.set_default_size(self.width, self.height)
+        if self.width != 0 and self.height != 0:
+            self.set_default_size(max(420, self.width), max(180, self.height))
 
         self.header = Gtk.HeaderBar()
         self.header.set_title(APP_DISPLAY_NAME)
         self.header.set_show_close_button(True)
         self.buttons = []
+        self.menu_button = None
+        self.media_buttons = []
+        self.current_text_clear_button = None
+        self.resize_grip = None
         self.key_buttons = {}
         self.modifier_buttons = {}
         self.layout_button = None
@@ -736,6 +785,8 @@ class VirtualKeyboard(Gtk.Window):
         self.tray_compact_tv_item = None
         self.tray_layout_items = {}
         self.settings_dialog = None
+        self.settings_preset_combo = None
+        self.settings_preset_delete_btn = None
         self.settings_gesture_check = None
         self.settings_visual_feedback_check = None
         self.settings_sync_layout_check = None
@@ -743,6 +794,18 @@ class VirtualKeyboard(Gtk.Window):
         self.settings_mode_combo = None
         self.settings_theme_combo = None
         self.settings_accent_combo = None
+        self.settings_accent_color_btn = None
+        self.settings_custom_colors_check = None
+        self.settings_win_bg_btn = None
+        self.settings_key_bg_btn = None
+        self.settings_mod_bg_btn = None
+        self.settings_text_color_btn = None
+        self.settings_key_border_color_btn = None
+        self.settings_win_border_color_btn = None
+        self.settings_win_border_width_scale = None
+        self.settings_key_border_width_scale = None
+        self.settings_font_weight_combo = None
+        self.settings_key_shadow_check = None
         self.settings_opacity_scale = None
         self.settings_font_scale = None
         self.settings_radius_scale = None
@@ -786,6 +849,7 @@ class VirtualKeyboard(Gtk.Window):
         self.backend = self._initialize_input_backend()
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        content.set_name("vboard-content")
         self.content_box = content
         self.add(content)
 
@@ -828,6 +892,10 @@ class VirtualKeyboard(Gtk.Window):
         grid.connect("size-allocate", self.on_grid_size_allocate)
         self.grid = grid
         grid_overlay.add(grid)
+
+        self.resize_grip = self.create_resize_grip()
+        grid_overlay.add_overlay(self.resize_grip)
+
         self.apply_css()
         if self.text_prediction_enabled:
             GLib.idle_add(self.preload_suggestions)
@@ -838,6 +906,7 @@ class VirtualKeyboard(Gtk.Window):
         self.populate_keyboard_grid()
         self.update_layout_button()
         self.update_fast_layout_bar_visibility()
+        self.refresh_vector_icons()
 
         if self.gesture_enabled:
             self.enable_gesture_typing(sync_controls=False, save=False)
@@ -876,6 +945,147 @@ class VirtualKeyboard(Gtk.Window):
         if getattr(self, "backend", None) is not None:
             self.backend.release_all_keys()
 
+    def get_active_icon_color(self):
+        palette = resolve_theme_palette(
+            style_variant=self.style_variant,
+            bg_color=self.bg_color,
+            text_color=self.text_color,
+            accent_hex=self.accent_color,
+            use_custom_colors=self.use_custom_colors,
+            custom_window_bg=self.custom_window_bg,
+            custom_key_bg=self.custom_key_bg,
+            custom_modifier_bg=self.custom_modifier_bg,
+            custom_text_color=self.custom_text_color,
+            custom_key_border_color=self.custom_key_border_color,
+            window_border_color=self.window_border_color,
+        )
+        return palette["icon_color"]
+
+    def refresh_vector_icons(self):
+        icon_color = self.get_active_icon_color()
+        header_icon_px = max(13, min(22, int(round(self.header_font_size * 1.25))))
+        media_icon_px = max(14, min(26, int(round(self.secondary_key_font_size * 1.35))))
+        key_icon_px = max(15, min(30, int(round(self.key_font_size * 1.15))))
+
+        if getattr(self, "menu_button", None) is not None:
+            set_button_vector_icon(
+                self.menu_button, "menu", size_px=header_icon_px, color=icon_color
+            )
+        for btn, icon_name in getattr(self, "media_buttons", ()):
+            set_button_vector_icon(
+                btn, icon_name, size_px=media_icon_px, color=icon_color
+            )
+        if getattr(self, "current_text_clear_button", None) is not None:
+            set_button_vector_icon(
+                self.current_text_clear_button,
+                "clear",
+                size_px=max(12, header_icon_px - 1),
+                color=icon_color,
+            )
+        if getattr(self, "resize_grip", None) is not None:
+            grip_img = render_icon_image("resize-grip", size_px=14, color=icon_color)
+            for child in self.resize_grip.get_children():
+                self.resize_grip.remove(child)
+            self.resize_grip.add(grip_img)
+            self.resize_grip.show_all()
+
+        key_buttons = getattr(self, "key_buttons", {})
+        options_btn = key_buttons.get(TV_ACTION_OPTIONS)
+        if options_btn is not None:
+            set_button_vector_icon(
+                options_btn, "settings", size_px=key_icon_px, color=icon_color
+            )
+        if self.keyboard_mode == KEYBOARD_MODE_COMPACT_TV:
+            bs_btn = key_buttons.get("Backspace")
+            if bs_btn is not None:
+                set_button_vector_icon(
+                    bs_btn, "backspace", size_px=key_icon_px, color=icon_color
+                )
+
+    def create_resize_grip(self):
+        grip = Gtk.EventBox()
+        grip.set_name("resize-grip")
+        grip.set_halign(Gtk.Align.END)
+        grip.set_valign(Gtk.Align.END)
+        grip.set_visible_window(False)
+        grip.set_tooltip_text("Drag to resize keyboard")
+        grip.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.ENTER_NOTIFY_MASK
+        )
+        grip.connect("realize", self._on_resize_grip_realize)
+        grip.connect("button-press-event", self._on_resize_grip_press)
+        grip_img = render_icon_image(
+            "resize-grip", size_px=14, color=self.get_active_icon_color()
+        )
+        grip.add(grip_img)
+        return grip
+
+    def _on_resize_grip_realize(self, widget):
+        gdk_win = widget.get_window()
+        display = widget.get_display()
+        if gdk_win is not None and display is not None:
+            cursor = Gdk.Cursor.new_from_name(display, "nwse-resize")
+            if cursor is not None:
+                gdk_win.set_cursor(cursor)
+
+    def _on_resize_grip_press(self, widget, event):
+        if event.button == 1:
+            self.begin_resize_drag(
+                Gdk.WindowEdge.SOUTH_EAST,
+                event.button,
+                int(event.x_root),
+                int(event.y_root),
+                event.time,
+            )
+            return True
+        return False
+
+    def _detect_resize_edge(self, x, y, margin=6):
+        width, height = self.get_size()
+        if width <= 0 or height <= 0:
+            return None
+        left = x <= margin
+        right = x >= width - margin
+        top = y <= margin
+        bottom = y >= height - margin
+        if top and left:
+            return Gdk.WindowEdge.NORTH_WEST
+        if top and right:
+            return Gdk.WindowEdge.NORTH_EAST
+        if bottom and left:
+            return Gdk.WindowEdge.SOUTH_WEST
+        if bottom and right:
+            return Gdk.WindowEdge.SOUTH_EAST
+        if left:
+            return Gdk.WindowEdge.WEST
+        if right:
+            return Gdk.WindowEdge.EAST
+        if top:
+            return Gdk.WindowEdge.NORTH
+        if bottom:
+            return Gdk.WindowEdge.SOUTH
+        return None
+
+    def on_window_button_press_event(self, widget, event):
+        if event.button != 1:
+            return False
+        edge = self._detect_resize_edge(event.x, event.y)
+        if edge is not None:
+            self.begin_resize_drag(
+                edge,
+                event.button,
+                int(event.x_root),
+                int(event.y_root),
+                event.time,
+            )
+            return True
+        return False
+
+    def on_window_motion_event(self, widget, event):
+        if self.gesture_controller is not None:
+            self.gesture_controller.handle_key_motion(widget, event)
+        return False
+
     def create_media_bar(self):
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         bar.set_name("media-bar")
@@ -884,26 +1094,30 @@ class VirtualKeyboard(Gtk.Window):
         bar.set_margin_top(4)
         bar.set_margin_bottom(0)
         controls = (
-            ("☀−", "BrightnessDown", "Decrease screen brightness"),
-            ("☀+", "BrightnessUp", "Increase screen brightness"),
-            ("⏮", "PreviousSong", "Previous track"),
-            ("⏯", "PlayPause", "Play / Pause"),
-            ("⏭", "NextSong", "Next track"),
-            ("🔇", "VolumeMute", "Mute / Unmute"),
-            ("🔉", "VolumeDown", "Volume down"),
-            ("🔊", "VolumeUp", "Volume up"),
-            ("PrtSc", "Print", "Screenshot"),
+            ("brightness-down", "BrightnessDown", "Decrease screen brightness"),
+            ("brightness-up", "BrightnessUp", "Increase screen brightness"),
+            ("media-previous", "PreviousSong", "Previous track"),
+            ("media-play-pause", "PlayPause", "Play / Pause"),
+            ("media-next", "NextSong", "Next track"),
+            ("audio-mute", "VolumeMute", "Mute / Unmute"),
+            ("audio-low", "VolumeDown", "Volume down"),
+            ("audio-high", "VolumeUp", "Volume up"),
+            ("screenshot", "Print", "Screenshot"),
         )
-        for label, key_event, tooltip in controls:
-            btn = Gtk.Button(label=label)
+        self.media_buttons = []
+        icon_color = self.get_active_icon_color()
+        for icon_name, key_event, tooltip in controls:
+            btn = Gtk.Button()
             btn.set_can_focus(False)
             btn.set_focus_on_click(False)
             btn.set_tooltip_text(tooltip)
+            set_button_vector_icon(btn, icon_name, size_px=16, color=icon_color)
             btn.connect(
                 "clicked",
                 lambda _widget, k=key_event: self.on_media_key_clicked(k),
             )
             bar.pack_start(btn, True, True, 0)
+            self.media_buttons.append((btn, icon_name))
         return bar
 
     def on_media_key_clicked(self, key_event):
@@ -935,12 +1149,16 @@ class VirtualKeyboard(Gtk.Window):
         label.set_single_line_mode(True)
         bar.pack_start(label, True, True, 0)
 
-        clear_btn = Gtk.Button(label="✕")
+        clear_btn = Gtk.Button()
         clear_btn.set_name("current-text-clear")
         clear_btn.set_can_focus(False)
         clear_btn.set_focus_on_click(False)
         clear_btn.set_tooltip_text("Clear text preview buffer")
+        set_button_vector_icon(
+            clear_btn, "clear", size_px=14, color=self.get_active_icon_color()
+        )
         clear_btn.connect("clicked", lambda _w: self.clear_current_text_buffer())
+        self.current_text_clear_button = clear_btn
         bar.pack_end(clear_btn, False, False, 0)
         return bar, label
 
@@ -1146,9 +1364,7 @@ class VirtualKeyboard(Gtk.Window):
         self.tray_prediction_item.connect("toggled", self.on_tray_prediction_toggled)
         tray_menu.append(self.tray_prediction_item)
 
-        self.tray_gesture_item = Gtk.CheckMenuItem(
-            label="Touch Typing (requires app restart)"
-        )
+        self.tray_gesture_item = Gtk.CheckMenuItem(label="Swipe Typing")
         self.tray_gesture_item.connect("toggled", self.on_tray_gesture_toggled)
         tray_menu.append(self.tray_gesture_item)
 
@@ -1974,16 +2190,37 @@ class VirtualKeyboard(Gtk.Window):
         if save:
             self.save_settings()
 
+    @staticmethod
+    def _hex_to_gdk_rgba(hex_color):
+        r, g, b = parse_hex_rgb(hex_color, fallback=(255, 255, 255))
+        rgba = Gdk.RGBA()
+        rgba.red = r / 255.0
+        rgba.green = g / 255.0
+        rgba.blue = b / 255.0
+        rgba.alpha = 1.0
+        return rgba
+
+    @staticmethod
+    def _gdk_rgba_to_hex(rgba):
+        return rgb_to_hex(
+            (
+                round(rgba.red * 255),
+                round(rgba.green * 255),
+                round(rgba.blue * 255),
+            )
+        )
+
     def get_active_theme_label(self):
-        if self.style_variant == "apple_dark":
-            return "Apple macOS Dark"
-        if self.style_variant == "apple_light":
-            return "Apple macOS Light"
-        if self.style_variant == "onboard":
-            return "Onboard Droid Theme"
-        if self.style_variant == "high_contrast_tv":
+        variant = normalize_style_variant(self.style_variant)
+        if variant == "graphite_dark":
+            return "Graphite Dark"
+        if variant == "frost_light":
+            return "Frost Light"
+        if variant == "onboard":
+            return "Onboard Droid"
+        if variant == "high_contrast_tv":
             return "High Contrast TV"
-        if self.style_variant == "enhanced":
+        if variant == "enhanced":
             for label, color in COLOR_CHOICES:
                 if (
                     isinstance(color, tuple)
@@ -1992,10 +2229,11 @@ class VirtualKeyboard(Gtk.Window):
                     and color[1] == self.bg_color
                 ):
                     return label
+            return "Enhanced Charcoal"
         for label, color in COLOR_CHOICES:
             if color == self.bg_color:
                 return label
-        return None
+        return "Classic Black"
 
     def sync_theme_comboboxes(self):
         active_label = self.get_active_theme_label()
@@ -2011,14 +2249,67 @@ class VirtualKeyboard(Gtk.Window):
             if self.settings_theme_combo.get_active_id() != active_label:
                 self.settings_theme_combo.set_active_id(active_label)
 
+    def refresh_preset_combobox(self):
+        combo = self.settings_preset_combo
+        if combo is None:
+            return
+        prev_sync = self._syncing_settings_dialog
+        self._syncing_settings_dialog = True
+        try:
+            combo.remove_all()
+            combo.append("", "— Select Saved Preset —")
+            presets = self.preset_manager.list_presets()
+            preset_names = [name for name, _settings in presets]
+            for name in preset_names:
+                combo.append(name, name)
+            if self.active_preset_name in preset_names:
+                combo.set_active_id(self.active_preset_name)
+            else:
+                combo.set_active_id("")
+            if self.settings_preset_delete_btn is not None:
+                self.settings_preset_delete_btn.set_sensitive(
+                    bool(combo.get_active_id())
+                )
+        finally:
+            self._syncing_settings_dialog = prev_sync
+
     def sync_settings_dialog_controls(self):
         if self.settings_dialog is None:
             return
         self._syncing_settings_dialog = True
         try:
             self.sync_theme_comboboxes()
+            self.refresh_preset_combobox()
             if self.settings_accent_combo is not None:
-                self.settings_accent_combo.set_active_id(self.accent_color)
+                if not self.settings_accent_combo.set_active_id(self.accent_color):
+                    self.settings_accent_combo.set_active_id("__custom__")
+            if self.settings_accent_color_btn is not None:
+                self.settings_accent_color_btn.set_rgba(
+                    self._hex_to_gdk_rgba(self.accent_color)
+                )
+            if self.settings_custom_colors_check is not None:
+                self.settings_custom_colors_check.set_active(self.use_custom_colors)
+            for attr, hex_val in (
+                ("settings_win_bg_btn", self.custom_window_bg),
+                ("settings_key_bg_btn", self.custom_key_bg),
+                ("settings_mod_bg_btn", self.custom_modifier_bg),
+                ("settings_text_color_btn", self.custom_text_color),
+                ("settings_key_border_color_btn", self.custom_key_border_color),
+                ("settings_win_border_color_btn", self.window_border_color),
+            ):
+                btn = getattr(self, attr, None)
+                if btn is not None:
+                    btn.set_rgba(self._hex_to_gdk_rgba(hex_val))
+            if self.settings_win_border_width_scale is not None:
+                self.settings_win_border_width_scale.set_value(
+                    self.window_border_width
+                )
+            if self.settings_key_border_width_scale is not None:
+                self.settings_key_border_width_scale.set_value(self.key_border_width)
+            if self.settings_font_weight_combo is not None:
+                self.settings_font_weight_combo.set_active_id(str(self.font_weight))
+            if self.settings_key_shadow_check is not None:
+                self.settings_key_shadow_check.set_active(self.key_shadow_enabled)
             if self.settings_opacity_scale is not None:
                 self.settings_opacity_scale.set_value(
                     round(self._parse_opacity(self.opacity) * 100)
@@ -2192,6 +2483,9 @@ class VirtualKeyboard(Gtk.Window):
         self._cleaned_up = True
         self.stop_all_active_keys()
         self.cancel_inactivity_timer()
+        if self._scale_timer_id is not None:
+            GLib.source_remove(self._scale_timer_id)
+            self._scale_timer_id = None
         if self._watchdog_source is not None:
             GLib.source_remove(self._watchdog_source)
             self._watchdog_source = None
@@ -2250,7 +2544,13 @@ class VirtualKeyboard(Gtk.Window):
         self.header.pack_start(self.layout_button_box)
         self.rebuild_layout_buttons()
 
-        self.create_button("☰", self.change_visibility, callbacks=1)
+        self.menu_button = self.create_button(
+            "", self.change_visibility, callbacks=1, hide_with_menu=False
+        )
+        self.menu_button.set_tooltip_text("Toggle quick background & opacity controls")
+        set_button_vector_icon(
+            self.menu_button, "menu", size_px=15, color=self.get_active_icon_color()
+        )
         self.create_button(
             "Options",
             self.open_settings_dialog,
@@ -2260,7 +2560,7 @@ class VirtualKeyboard(Gtk.Window):
         self.create_button("+", self.change_opacity, True, 2)
         self.create_button("-", self.change_opacity, False, 2)
         self.create_button(f"{self.opacity}")
-        self.color_combobox.append_text("Change Background")
+        self.color_combobox.append_text("Theme")
         self.color_combobox.connect("changed", self.change_color)
         self.color_combobox.set_name("combobox")
         self.header.pack_end(self.color_combobox)
@@ -2278,22 +2578,31 @@ class VirtualKeyboard(Gtk.Window):
 
         self.color_combobox.set_active(active_index)
 
+    def _sync_custom_color_defaults_from_theme(self):
+        base = get_base_theme_colors(self.style_variant, self.bg_color, self.text_color)
+        self.custom_window_bg = base["window_bg"]
+        self.custom_key_bg = base["key_bg"]
+        self.custom_modifier_bg = base["modifier_bg"]
+        self.custom_text_color = base["text_color"]
+        self.custom_key_border_color = base["key_border_color"]
+        self.window_border_color = base["window_border_color"]
+
     def set_theme_by_label(self, selected_label, save=True):
         selected_color = self.color_map.get(selected_label)
         if selected_color is None:
             return
-        if selected_color == APPLE_DARK_BACKGROUND_PRESET:
-            self.style_variant = "apple_dark"
-            self.text_color = "white"
-        elif selected_color == APPLE_LIGHT_BACKGROUND_PRESET:
-            self.style_variant = "apple_light"
+        if selected_color == GRAPHITE_DARK_BACKGROUND_PRESET:
+            self.style_variant = "graphite_dark"
+            self.text_color = "#F5F5F7"
+        elif selected_color == FROST_LIGHT_BACKGROUND_PRESET:
+            self.style_variant = "frost_light"
             self.text_color = "#1D1D1F"
         elif selected_color == ONBOARD_BACKGROUND_PRESET:
             self.style_variant = "onboard"
-            self.text_color = "white"
+            self.text_color = "#F2F5FA"
         elif selected_color == HIGH_CONTRAST_TV_BACKGROUND_PRESET:
             self.style_variant = "high_contrast_tv"
-            self.text_color = "white"
+            self.text_color = "#FFFFFF"
         elif (
             isinstance(selected_color, tuple)
             and len(selected_color) == 2
@@ -2302,18 +2611,162 @@ class VirtualKeyboard(Gtk.Window):
             self.style_variant = "enhanced"
             self.bg_color = selected_color[1]
             self.text_color = (
-                "#1C1C1C" if self.bg_color in LIGHT_BACKGROUND_COLORS else "white"
+                "#1C1C1C" if self.bg_color in LIGHT_BACKGROUND_COLORS else "#F5F5F7"
             )
         else:
             self.style_variant = "classic"
             self.bg_color = selected_color
             self.text_color = (
-                "#1C1C1C" if self.bg_color in LIGHT_BACKGROUND_COLORS else "white"
+                "#1C1C1C" if self.bg_color in LIGHT_BACKGROUND_COLORS else "#F5F5F7"
             )
+        self.use_custom_colors = False
+        self._sync_custom_color_defaults_from_theme()
         self.apply_css()
         self.sync_settings_dialog_controls()
         if save:
             self.save_settings()
+
+    def get_preset_snapshot(self):
+        return {
+            "style_variant": self.style_variant,
+            "bg_color": self.bg_color,
+            "text_color": self.text_color,
+            "opacity": self.opacity,
+            "accent_color": self.accent_color,
+            "font_scale": self.font_scale,
+            "font_weight": self.font_weight,
+            "key_corner_radius": self.key_corner_radius,
+            "key_spacing": self.key_spacing,
+            "key_border_width": self.key_border_width,
+            "window_border_width": self.window_border_width,
+            "window_border_color": self.window_border_color,
+            "key_shadow_enabled": self.key_shadow_enabled,
+            "use_custom_colors": self.use_custom_colors,
+            "custom_window_bg": self.custom_window_bg,
+            "custom_key_bg": self.custom_key_bg,
+            "custom_modifier_bg": self.custom_modifier_bg,
+            "custom_text_color": self.custom_text_color,
+            "custom_key_border_color": self.custom_key_border_color,
+            "keyboard_mode": self.keyboard_mode,
+            "show_media_row": self.show_media_row,
+            "show_current_text_bar": self.show_current_text_bar,
+            "show_fast_layout_bar": self.show_fast_layout_bar,
+            "show_modifier_hints": self.show_modifier_hints,
+            "text_prediction_enabled": self.text_prediction_enabled,
+        }
+
+    def apply_preset_dict(self, preset_dict, save=True):
+        if not isinstance(preset_dict, dict):
+            return
+        if "style_variant" in preset_dict:
+            self.style_variant = normalize_style_variant(preset_dict["style_variant"])
+        if "bg_color" in preset_dict:
+            self.bg_color = str(preset_dict["bg_color"]).replace(" ", "")
+        if "text_color" in preset_dict:
+            self.text_color = str(preset_dict["text_color"])
+        if "opacity" in preset_dict:
+            self.opacity = f"{self._parse_opacity(preset_dict['opacity']):.2f}"
+        if "accent_color" in preset_dict and str(preset_dict["accent_color"]).startswith("#"):
+            self.accent_color = str(preset_dict["accent_color"])
+        if "font_scale" in preset_dict:
+            try:
+                self.font_scale = max(0.75, min(1.60, round(float(preset_dict["font_scale"]), 2)))
+            except (TypeError, ValueError):
+                pass
+        if "font_weight" in preset_dict and str(preset_dict["font_weight"]) in ("400", "500", "600", "700"):
+            self.font_weight = str(preset_dict["font_weight"])
+        if "key_corner_radius" in preset_dict:
+            try:
+                self.key_corner_radius = max(0, min(16, int(round(float(preset_dict["key_corner_radius"])))))
+            except (TypeError, ValueError):
+                pass
+        if "key_spacing" in preset_dict:
+            try:
+                self.key_spacing = max(1, min(8, int(round(float(preset_dict["key_spacing"])))))
+            except (TypeError, ValueError):
+                pass
+        if "key_border_width" in preset_dict:
+            try:
+                self.key_border_width = max(0, min(3, int(round(float(preset_dict["key_border_width"])))))
+            except (TypeError, ValueError):
+                pass
+        if "window_border_width" in preset_dict:
+            try:
+                self.window_border_width = max(0, min(4, int(round(float(preset_dict["window_border_width"])))))
+            except (TypeError, ValueError):
+                pass
+        for color_attr in (
+            "window_border_color",
+            "custom_window_bg",
+            "custom_key_bg",
+            "custom_modifier_bg",
+            "custom_text_color",
+            "custom_key_border_color",
+        ):
+            val = preset_dict.get(color_attr)
+            if isinstance(val, str) and val.startswith("#"):
+                setattr(self, color_attr, val.upper())
+        if "key_shadow_enabled" in preset_dict:
+            self.key_shadow_enabled = bool(preset_dict["key_shadow_enabled"])
+        if "use_custom_colors" in preset_dict:
+            self.use_custom_colors = bool(preset_dict["use_custom_colors"])
+        if "show_media_row" in preset_dict:
+            self.show_media_row = bool(preset_dict["show_media_row"])
+            self.update_media_bar_visibility()
+        if "show_current_text_bar" in preset_dict:
+            self.show_current_text_bar = bool(preset_dict["show_current_text_bar"])
+            self.update_current_text_bar_visibility()
+        if "show_fast_layout_bar" in preset_dict:
+            self.show_fast_layout_bar = bool(preset_dict["show_fast_layout_bar"])
+            self.update_fast_layout_bar_visibility()
+        if "show_modifier_hints" in preset_dict:
+            self.show_modifier_hints = bool(preset_dict["show_modifier_hints"])
+            self.update_modifier_hints()
+        if "text_prediction_enabled" in preset_dict:
+            self.text_prediction_enabled = bool(preset_dict["text_prediction_enabled"])
+            self.update_suggestion_bar_visibility()
+        if "keyboard_mode" in preset_dict:
+            target_mode = self.normalize_keyboard_mode(preset_dict["keyboard_mode"])
+            if target_mode != self.keyboard_mode:
+                self.set_keyboard_mode(target_mode, save=False)
+
+        if hasattr(self, "opacity_btn") and self.opacity_btn is not None:
+            self.opacity_btn.set_label(self.opacity)
+        self._last_suggestion_scale = None
+        self.update_suggestion_bar_scale()
+        self.apply_css()
+        self.sync_settings_dialog_controls()
+        self.sync_tray_items()
+        if save:
+            self.save_settings()
+
+    def save_user_preset(self, name):
+        cleaned = (name or "").strip()
+        if not cleaned:
+            return None
+        path = self.preset_manager.save_preset(cleaned, self.get_preset_snapshot())
+        self.active_preset_name = cleaned
+        self.refresh_preset_combobox()
+        self.save_settings()
+        return path
+
+    def load_user_preset(self, name, save=True):
+        settings = self.preset_manager.load_preset(name)
+        if settings is None:
+            return False
+        self.active_preset_name = name
+        self.apply_preset_dict(settings, save=save)
+        return True
+
+    def delete_user_preset(self, name):
+        if not name:
+            return False
+        deleted = self.preset_manager.delete_preset(name)
+        if deleted and self.active_preset_name == name:
+            self.active_preset_name = ""
+        self.refresh_preset_combobox()
+        self.save_settings()
+        return deleted
 
     def set_font_scale(self, scale, save=True):
         clamped = max(0.75, min(1.60, round(float(scale), 2)))
@@ -2322,6 +2775,17 @@ class VirtualKeyboard(Gtk.Window):
         self.font_scale = clamped
         self._last_suggestion_scale = None
         self.update_suggestion_bar_scale()
+        self.apply_css()
+        if save:
+            self.save_settings()
+
+    def set_font_weight(self, weight, save=True):
+        weight_str = str(weight)
+        if weight_str not in ("400", "500", "600", "700"):
+            return
+        if weight_str == self.font_weight:
+            return
+        self.font_weight = weight_str
         self.apply_css()
         if save:
             self.save_settings()
@@ -2344,13 +2808,81 @@ class VirtualKeyboard(Gtk.Window):
         if save:
             self.save_settings()
 
+    def set_key_border_width(self, width, save=True):
+        clamped = max(0, min(3, int(round(width))))
+        if clamped == self.key_border_width:
+            return
+        self.key_border_width = clamped
+        self.apply_css()
+        if save:
+            self.save_settings()
+
+    def set_window_border_width(self, width, save=True):
+        clamped = max(0, min(4, int(round(width))))
+        if clamped == self.window_border_width:
+            return
+        self.window_border_width = clamped
+        self.apply_css()
+        if save:
+            self.save_settings()
+
+    def set_window_border_color(self, hex_color, save=True):
+        if not isinstance(hex_color, str) or not hex_color.startswith("#"):
+            return
+        normalized = hex_color.upper()
+        if normalized == self.window_border_color:
+            return
+        self.window_border_color = normalized
+        self.apply_css()
+        if save:
+            self.save_settings()
+
+    def set_key_shadow_enabled(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.key_shadow_enabled:
+            return
+        self.key_shadow_enabled = enabled
+        self.apply_css()
+        if save:
+            self.save_settings()
+
+    def set_use_custom_colors(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.use_custom_colors:
+            return
+        self.use_custom_colors = enabled
+        self.apply_css()
+        self.sync_settings_dialog_controls()
+        if save:
+            self.save_settings()
+
+    def set_custom_color(self, attr_name, hex_color, save=True):
+        allowed = {
+            "custom_window_bg",
+            "custom_key_bg",
+            "custom_modifier_bg",
+            "custom_text_color",
+            "custom_key_border_color",
+        }
+        if attr_name not in allowed or not isinstance(hex_color, str) or not hex_color.startswith("#"):
+            return
+        normalized = hex_color.upper()
+        setattr(self, attr_name, normalized)
+        self.use_custom_colors = True
+        self.apply_css()
+        self.sync_settings_dialog_controls()
+        if save:
+            self.save_settings()
+
     def set_accent_color(self, accent_hex, save=True):
         if not isinstance(accent_hex, str) or not accent_hex.startswith("#"):
             return
-        if accent_hex == self.accent_color:
+        normalized = accent_hex.upper()
+        if normalized == self.accent_color:
             return
-        self.accent_color = accent_hex
+        self.accent_color = normalized
         self.apply_css()
+        self.sync_settings_dialog_controls()
         if save:
             self.save_settings()
 
@@ -2486,12 +3018,19 @@ class VirtualKeyboard(Gtk.Window):
             self.save_settings()
 
     def reset_appearance_defaults(self, _widget=None):
-        self.style_variant = "apple_dark"
+        self.style_variant = "graphite_dark"
         self.accent_color = DEFAULT_ACCENT_COLOR
         self.opacity = "0.92"
         self.font_scale = DEFAULT_FONT_SCALE
+        self.font_weight = DEFAULT_FONT_WEIGHT
         self.key_corner_radius = DEFAULT_KEY_RADIUS
         self.key_spacing = DEFAULT_KEY_SPACING
+        self.key_border_width = DEFAULT_KEY_BORDER_WIDTH
+        self.window_border_width = DEFAULT_WINDOW_BORDER_WIDTH
+        self.key_shadow_enabled = DEFAULT_KEY_SHADOW_ENABLED
+        self.use_custom_colors = False
+        self.active_preset_name = ""
+        self._sync_custom_color_defaults_from_theme()
         if hasattr(self, "opacity_btn") and self.opacity_btn is not None:
             self.opacity_btn.set_label(self.opacity)
         self._last_suggestion_scale = None
@@ -2510,7 +3049,7 @@ class VirtualKeyboard(Gtk.Window):
             transient_for=self,
             modal=True,
         )
-        dialog.set_default_size(500, 420)
+        dialog.set_default_size(540, 520)
         dialog.add_button("Close", Gtk.ResponseType.CLOSE)
         dialog.connect("response", self.on_settings_dialog_response)
         dialog.connect("destroy", self.on_settings_dialog_destroy)
@@ -2522,11 +3061,43 @@ class VirtualKeyboard(Gtk.Window):
         notebook = Gtk.Notebook()
         content.pack_start(notebook, True, True, 0)
 
-        # --- Tab 1: Appearance ---
-        appearance_grid = Gtk.Grid(column_spacing=12, row_spacing=10)
-        appearance_grid.set_border_width(12)
+        # --- Tab 1: Appearance & Presets ---
+        appearance_scroll = Gtk.ScrolledWindow()
+        appearance_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        appearance_scroll.set_min_content_height(380)
 
-        theme_label = Gtk.Label(label="Theme", xalign=0)
+        appearance_grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        appearance_grid.set_border_width(12)
+        appearance_scroll.add(appearance_grid)
+
+        row = 0
+
+        # Presets manager bar
+        preset_label = Gtk.Label(label="My Presets", xalign=0)
+        preset_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        preset_combo = Gtk.ComboBoxText()
+        preset_combo.set_hexpand(True)
+        preset_combo.connect("changed", self.on_settings_preset_changed)
+        save_preset_btn = Gtk.Button(label="Save…")
+        save_preset_btn.set_tooltip_text("Save current appearance & toolbar settings as a preset")
+        save_preset_btn.connect("clicked", self.on_settings_save_preset_clicked)
+        delete_preset_btn = Gtk.Button(label="Delete")
+        delete_preset_btn.set_tooltip_text("Delete selected user preset")
+        delete_preset_btn.connect("clicked", self.on_settings_delete_preset_clicked)
+        preset_box.pack_start(preset_combo, True, True, 0)
+        preset_box.pack_start(save_preset_btn, False, False, 0)
+        preset_box.pack_start(delete_preset_btn, False, False, 0)
+        appearance_grid.attach(preset_label, 0, row, 1, 1)
+        appearance_grid.attach(preset_box, 1, row, 2, 1)
+        self.settings_preset_combo = preset_combo
+        self.settings_preset_delete_btn = delete_preset_btn
+        self.refresh_preset_combobox()
+        row += 1
+
+        appearance_grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, row, 3, 1)
+        row += 1
+
+        theme_label = Gtk.Label(label="Theme Base", xalign=0)
         theme_combo = Gtk.ComboBoxText()
         for label, _color in COLOR_CHOICES:
             theme_combo.append(label, label)
@@ -2534,19 +3105,93 @@ class VirtualKeyboard(Gtk.Window):
         if active_theme_label:
             theme_combo.set_active_id(active_theme_label)
         theme_combo.connect("changed", self.on_settings_theme_changed)
-        appearance_grid.attach(theme_label, 0, 0, 1, 1)
-        appearance_grid.attach(theme_combo, 1, 0, 2, 1)
+        appearance_grid.attach(theme_label, 0, row, 1, 1)
+        appearance_grid.attach(theme_combo, 1, row, 2, 1)
         self.settings_theme_combo = theme_combo
+        row += 1
 
         accent_label = Gtk.Label(label="Accent Color", xalign=0)
+        accent_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         accent_combo = Gtk.ComboBoxText()
+        accent_combo.set_hexpand(True)
         for accent_name, accent_hex in ACCENT_COLOR_CHOICES:
             accent_combo.append(accent_hex, accent_name)
-        accent_combo.set_active_id(self.accent_color)
+        accent_combo.append("__custom__", "Custom")
+        if not accent_combo.set_active_id(self.accent_color):
+            accent_combo.set_active_id("__custom__")
         accent_combo.connect("changed", self.on_settings_accent_changed)
-        appearance_grid.attach(accent_label, 0, 1, 1, 1)
-        appearance_grid.attach(accent_combo, 1, 1, 2, 1)
+        accent_color_btn = Gtk.ColorButton.new_with_rgba(
+            self._hex_to_gdk_rgba(self.accent_color)
+        )
+        accent_color_btn.set_title("Choose Accent Color")
+        accent_color_btn.connect("color-set", self.on_settings_accent_color_btn_set)
+        accent_box.pack_start(accent_combo, True, True, 0)
+        accent_box.pack_start(accent_color_btn, False, False, 0)
+        appearance_grid.attach(accent_label, 0, row, 1, 1)
+        appearance_grid.attach(accent_box, 1, row, 2, 1)
         self.settings_accent_combo = accent_combo
+        self.settings_accent_color_btn = accent_color_btn
+        row += 1
+
+        custom_colors_check = Gtk.CheckButton(
+            label="Customize Individual Colors (Background, Keys, Modifiers, Text & Icons)"
+        )
+        custom_colors_check.set_active(self.use_custom_colors)
+        custom_colors_check.connect("toggled", self.on_settings_custom_colors_toggled)
+        appearance_grid.attach(custom_colors_check, 0, row, 3, 1)
+        self.settings_custom_colors_check = custom_colors_check
+        row += 1
+
+        colors_grid = Gtk.Grid(column_spacing=12, row_spacing=6)
+        color_specs = (
+            ("Window BG", "custom_window_bg", "settings_win_bg_btn", 0, 0),
+            ("Key BG", "custom_key_bg", "settings_key_bg_btn", 2, 0),
+            ("Modifier BG", "custom_modifier_bg", "settings_mod_bg_btn", 0, 1),
+            ("Text & Icons", "custom_text_color", "settings_text_color_btn", 2, 1),
+            ("Key Border", "custom_key_border_color", "settings_key_border_color_btn", 0, 2),
+            ("Window Outline", "window_border_color", "settings_win_border_color_btn", 2, 2),
+        )
+        for title, attr_name, widget_attr, col_idx, row_idx in color_specs:
+            lbl = Gtk.Label(label=title, xalign=0)
+            cbtn = Gtk.ColorButton.new_with_rgba(
+                self._hex_to_gdk_rgba(getattr(self, attr_name))
+            )
+            cbtn.set_title(f"Choose {title} Color")
+            cbtn.set_hexpand(True)
+            if attr_name == "window_border_color":
+                cbtn.connect("color-set", self.on_settings_win_border_color_set)
+            else:
+                cbtn.connect("color-set", self.on_settings_custom_color_set, attr_name)
+            colors_grid.attach(lbl, col_idx, row_idx, 1, 1)
+            colors_grid.attach(cbtn, col_idx + 1, row_idx, 1, 1)
+            setattr(self, widget_attr, cbtn)
+        appearance_grid.attach(colors_grid, 0, row, 3, 1)
+        row += 1
+
+        appearance_grid.attach(Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL), 0, row, 3, 1)
+        row += 1
+
+        win_border_label = Gtk.Label(label="Window Outline Width (px)", xalign=0)
+        win_border_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 4, 1)
+        win_border_scale.set_digits(0)
+        win_border_scale.set_hexpand(True)
+        win_border_scale.set_value(self.window_border_width)
+        win_border_scale.connect("value-changed", self.on_settings_win_border_width_changed)
+        appearance_grid.attach(win_border_label, 0, row, 1, 1)
+        appearance_grid.attach(win_border_scale, 1, row, 2, 1)
+        self.settings_win_border_width_scale = win_border_scale
+        row += 1
+
+        key_border_label = Gtk.Label(label="Key Border Width (px)", xalign=0)
+        key_border_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 3, 1)
+        key_border_scale.set_digits(0)
+        key_border_scale.set_hexpand(True)
+        key_border_scale.set_value(self.key_border_width)
+        key_border_scale.connect("value-changed", self.on_settings_key_border_width_changed)
+        appearance_grid.attach(key_border_label, 0, row, 1, 1)
+        appearance_grid.attach(key_border_scale, 1, row, 2, 1)
+        self.settings_key_border_width_scale = key_border_scale
+        row += 1
 
         opacity_label = Gtk.Label(label="Opacity (%)", xalign=0)
         opacity_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 30, 100, 1)
@@ -2554,9 +3199,10 @@ class VirtualKeyboard(Gtk.Window):
         opacity_scale.set_hexpand(True)
         opacity_scale.set_value(round(self._parse_opacity(self.opacity) * 100))
         opacity_scale.connect("value-changed", self.on_settings_opacity_changed)
-        appearance_grid.attach(opacity_label, 0, 2, 1, 1)
-        appearance_grid.attach(opacity_scale, 1, 2, 2, 1)
+        appearance_grid.attach(opacity_label, 0, row, 1, 1)
+        appearance_grid.attach(opacity_scale, 1, row, 2, 1)
         self.settings_opacity_scale = opacity_scale
+        row += 1
 
         font_label = Gtk.Label(label="Key Font Scale (%)", xalign=0)
         font_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 75, 160, 5)
@@ -2564,9 +3210,21 @@ class VirtualKeyboard(Gtk.Window):
         font_scale.set_hexpand(True)
         font_scale.set_value(round(self.font_scale * 100))
         font_scale.connect("value-changed", self.on_settings_font_scale_changed)
-        appearance_grid.attach(font_label, 0, 3, 1, 1)
-        appearance_grid.attach(font_scale, 1, 3, 2, 1)
+        appearance_grid.attach(font_label, 0, row, 1, 1)
+        appearance_grid.attach(font_scale, 1, row, 2, 1)
         self.settings_font_scale = font_scale
+        row += 1
+
+        font_weight_label = Gtk.Label(label="Key Font Weight", xalign=0)
+        font_weight_combo = Gtk.ComboBoxText()
+        for weight_id, weight_name in FONT_WEIGHT_CHOICES:
+            font_weight_combo.append(weight_id, weight_name)
+        font_weight_combo.set_active_id(str(self.font_weight))
+        font_weight_combo.connect("changed", self.on_settings_font_weight_changed)
+        appearance_grid.attach(font_weight_label, 0, row, 1, 1)
+        appearance_grid.attach(font_weight_combo, 1, row, 2, 1)
+        self.settings_font_weight_combo = font_weight_combo
+        row += 1
 
         radius_label = Gtk.Label(label="Key Corner Radius (px)", xalign=0)
         radius_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 16, 1)
@@ -2574,9 +3232,10 @@ class VirtualKeyboard(Gtk.Window):
         radius_scale.set_hexpand(True)
         radius_scale.set_value(self.key_corner_radius)
         radius_scale.connect("value-changed", self.on_settings_radius_changed)
-        appearance_grid.attach(radius_label, 0, 4, 1, 1)
-        appearance_grid.attach(radius_scale, 1, 4, 2, 1)
+        appearance_grid.attach(radius_label, 0, row, 1, 1)
+        appearance_grid.attach(radius_scale, 1, row, 2, 1)
         self.settings_radius_scale = radius_scale
+        row += 1
 
         spacing_label = Gtk.Label(label="Key Spacing (px)", xalign=0)
         spacing_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1, 8, 1)
@@ -2584,15 +3243,23 @@ class VirtualKeyboard(Gtk.Window):
         spacing_scale.set_hexpand(True)
         spacing_scale.set_value(self.key_spacing)
         spacing_scale.connect("value-changed", self.on_settings_spacing_changed)
-        appearance_grid.attach(spacing_label, 0, 5, 1, 1)
-        appearance_grid.attach(spacing_scale, 1, 5, 2, 1)
+        appearance_grid.attach(spacing_label, 0, row, 1, 1)
+        appearance_grid.attach(spacing_scale, 1, row, 2, 1)
         self.settings_spacing_scale = spacing_scale
+        row += 1
 
-        reset_btn = Gtk.Button(label="Apply Apple macOS Dark Defaults")
+        shadow_check = Gtk.CheckButton(label="Keycap Depth Shadow")
+        shadow_check.set_active(self.key_shadow_enabled)
+        shadow_check.connect("toggled", self.on_settings_key_shadow_toggled)
+        appearance_grid.attach(shadow_check, 0, row, 3, 1)
+        self.settings_key_shadow_check = shadow_check
+        row += 1
+
+        reset_btn = Gtk.Button(label="Reset to Graphite Dark Defaults")
         reset_btn.connect("clicked", self.reset_appearance_defaults)
-        appearance_grid.attach(reset_btn, 0, 6, 3, 1)
+        appearance_grid.attach(reset_btn, 0, row, 3, 1)
 
-        notebook.append_page(appearance_grid, Gtk.Label(label="Appearance"))
+        notebook.append_page(appearance_scroll, Gtk.Label(label="Appearance"))
 
         # --- Tab 2: Toolbars & Layout ---
         layout_grid = Gtk.Grid(column_spacing=12, row_spacing=10)
@@ -2809,6 +3476,8 @@ class VirtualKeyboard(Gtk.Window):
 
     def on_settings_dialog_destroy(self, dialog):
         self.settings_dialog = None
+        self.settings_preset_combo = None
+        self.settings_preset_delete_btn = None
         self.settings_gesture_check = None
         self.settings_visual_feedback_check = None
         self.settings_sync_layout_check = None
@@ -2816,6 +3485,18 @@ class VirtualKeyboard(Gtk.Window):
         self.settings_mode_combo = None
         self.settings_theme_combo = None
         self.settings_accent_combo = None
+        self.settings_accent_color_btn = None
+        self.settings_custom_colors_check = None
+        self.settings_win_bg_btn = None
+        self.settings_key_bg_btn = None
+        self.settings_mod_bg_btn = None
+        self.settings_text_color_btn = None
+        self.settings_key_border_color_btn = None
+        self.settings_win_border_color_btn = None
+        self.settings_win_border_width_scale = None
+        self.settings_key_border_width_scale = None
+        self.settings_font_weight_combo = None
+        self.settings_key_shadow_check = None
         self.settings_opacity_scale = None
         self.settings_font_scale = None
         self.settings_radius_scale = None
@@ -2836,6 +3517,53 @@ class VirtualKeyboard(Gtk.Window):
         self.settings_fade_opacity_scale = None
         self.settings_start_minimized_check = None
 
+    def on_settings_preset_changed(self, widget):
+        if self._syncing_settings_dialog:
+            return
+        preset_name = widget.get_active_id()
+        if self.settings_preset_delete_btn is not None:
+            self.settings_preset_delete_btn.set_sensitive(bool(preset_name))
+        if preset_name:
+            self.load_user_preset(preset_name)
+
+    def on_settings_save_preset_clicked(self, _widget):
+        parent = self.settings_dialog or self
+        prompt = Gtk.Dialog(
+            title="Save Preset",
+            transient_for=parent,
+            modal=True,
+        )
+        prompt.set_default_size(340, 120)
+        prompt.add_button("Cancel", Gtk.ResponseType.CANCEL)
+        prompt.add_button("Save", Gtk.ResponseType.OK)
+        prompt.set_default_response(Gtk.ResponseType.OK)
+
+        area = prompt.get_content_area()
+        area.set_border_width(12)
+        area.set_spacing(8)
+        label = Gtk.Label(
+            label="Enter a name for this keyboard preset:", xalign=0
+        )
+        entry = Gtk.Entry()
+        entry.set_activates_default(True)
+        entry.set_text(self.active_preset_name or "My Custom Preset")
+        area.pack_start(label, False, False, 0)
+        area.pack_start(entry, False, False, 0)
+        prompt.show_all()
+
+        response = prompt.run()
+        name = entry.get_text().strip()
+        prompt.destroy()
+        if response == Gtk.ResponseType.OK and name:
+            self.save_user_preset(name)
+
+    def on_settings_delete_preset_clicked(self, _widget):
+        if self.settings_preset_combo is None:
+            return
+        preset_name = self.settings_preset_combo.get_active_id()
+        if preset_name:
+            self.delete_user_preset(preset_name)
+
     def on_settings_theme_changed(self, widget):
         if self._syncing_settings_dialog:
             return
@@ -2847,8 +3575,42 @@ class VirtualKeyboard(Gtk.Window):
         if self._syncing_settings_dialog:
             return
         accent_hex = widget.get_active_id()
-        if accent_hex is not None:
+        if accent_hex is not None and accent_hex.startswith("#"):
             self.set_accent_color(accent_hex)
+
+    def on_settings_accent_color_btn_set(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_accent_color(self._gdk_rgba_to_hex(widget.get_rgba()))
+
+    def on_settings_custom_colors_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_use_custom_colors(widget.get_active())
+
+    def on_settings_custom_color_set(self, widget, attr_name):
+        if not self._syncing_settings_dialog:
+            self.set_custom_color(attr_name, self._gdk_rgba_to_hex(widget.get_rgba()))
+
+    def on_settings_win_border_color_set(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_window_border_color(self._gdk_rgba_to_hex(widget.get_rgba()))
+
+    def on_settings_win_border_width_changed(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_window_border_width(widget.get_value())
+
+    def on_settings_key_border_width_changed(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_key_border_width(widget.get_value())
+
+    def on_settings_font_weight_changed(self, widget):
+        if not self._syncing_settings_dialog:
+            weight = widget.get_active_id()
+            if weight is not None:
+                self.set_font_weight(weight)
+
+    def on_settings_key_shadow_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_key_shadow_enabled(widget.get_active())
 
     def on_settings_opacity_changed(self, widget):
         if self._syncing_settings_dialog:
@@ -3024,6 +3786,18 @@ class VirtualKeyboard(Gtk.Window):
         self.suggestion_engine.ensure_loaded()
         return False
 
+    def schedule_scale_update(self, delay_ms=50):
+        if self._scale_timer_id is not None:
+            GLib.source_remove(self._scale_timer_id)
+        self._scale_timer_id = GLib.timeout_add(
+            delay_ms, self._run_scheduled_scale_update
+        )
+
+    def _run_scheduled_scale_update(self):
+        self._scale_timer_id = None
+        self.update_suggestion_bar_scale()
+        return False
+
     def on_resize(self, widget, event):
         self.width, self.height = self.get_size()
         x, y = self.get_position()
@@ -3031,13 +3805,13 @@ class VirtualKeyboard(Gtk.Window):
             self.pos_x, self.pos_y = x, y
         if self.gesture_controller is not None:
             self.gesture_controller.refresh_layout_cache()
-        self.update_suggestion_bar_scale()
+        self.schedule_scale_update(50)
 
     def on_grid_size_allocate(self, widget, allocation):
         if self.gesture_controller is not None:
             self.gesture_controller.refresh_layout_cache()
             self.gesture_controller.queue_overlay_draw()
-        self.update_suggestion_bar_scale()
+        self.schedule_scale_update(50)
 
     def update_suggestion_bar_scale(self):
         grid_width = self.grid.get_allocated_width() if hasattr(self, "grid") else 0
@@ -3068,10 +3842,6 @@ class VirtualKeyboard(Gtk.Window):
             9,
             min(18, int(round(self.BASE_HEADER_FONT_SIZE * min(1.25, effective_scale)))),
         )
-        suggestion_height = max(
-            20,
-            min(56, int(round(self.BASE_SUGGESTION_HEIGHT * base_scale))),
-        )
         suggestion_font_size = max(
             9,
             min(28, int(round(self.BASE_SUGGESTION_FONT_SIZE * effective_scale))),
@@ -3095,7 +3865,6 @@ class VirtualKeyboard(Gtk.Window):
             key_font_size,
             secondary_key_font_size,
             header_font_size,
-            suggestion_height,
             suggestion_font_size,
             spacing,
             margin,
@@ -3124,8 +3893,6 @@ class VirtualKeyboard(Gtk.Window):
             self.suggestion_bar.set_margin_end(margin)
             self.suggestion_bar.set_margin_top(margin)
             self.suggestion_bar.set_margin_bottom(margin_bottom)
-            for button in self.suggestion_buttons:
-                button.set_size_request(-1, suggestion_height)
 
         self.apply_css()
         return False
@@ -3163,6 +3930,8 @@ class VirtualKeyboard(Gtk.Window):
         hide_with_menu=True,
     ):
         button = Gtk.Button(label=label_)
+        button.set_can_focus(False)
+        button.set_focus_on_click(False)
         button.set_name("headbar-button")
         if callbacks == 1:
             button.connect("clicked", callback)
@@ -3181,7 +3950,7 @@ class VirtualKeyboard(Gtk.Window):
 
     def change_visibility(self, widget=None):
         for button in self.buttons:
-            if button.get_label() != "☰":
+            if button is not self.menu_button:
                 button.set_visible(not button.get_visible())
         self.color_combobox.set_visible(not self.color_combobox.get_visible())
         self._last_suggestion_scale = None
@@ -3225,6 +3994,17 @@ class VirtualKeyboard(Gtk.Window):
             suggestion_font_size=self.suggestion_font_size,
             key_radius=self.key_corner_radius,
             key_spacing=self.key_spacing,
+            font_weight=self.font_weight,
+            key_border_width=self.key_border_width,
+            window_border_width=self.window_border_width,
+            window_border_color=self.window_border_color,
+            key_shadow_enabled=self.key_shadow_enabled,
+            use_custom_colors=self.use_custom_colors,
+            custom_window_bg=self.custom_window_bg,
+            custom_key_bg=self.custom_key_bg,
+            custom_modifier_bg=self.custom_modifier_bg,
+            custom_text_color=self.custom_text_color,
+            custom_key_border_color=self.custom_key_border_color,
         )
 
         try:
@@ -3242,6 +4022,8 @@ class VirtualKeyboard(Gtk.Window):
             )
             self._css_provider_registered = True
 
+        self.refresh_vector_icons()
+
     def create_row(self, grid, row_index, keys):
         col = 0
 
@@ -3250,6 +4032,13 @@ class VirtualKeyboard(Gtk.Window):
             self.attach_grid_cell(grid, key_event, col, row_index, width, 1)
             col += width
 
+    def _key_vector_icon_name(self, key_event):
+        if key_event == TV_ACTION_OPTIONS:
+            return "settings"
+        if key_event == "Backspace" and self.keyboard_mode == KEYBOARD_MODE_COMPACT_TV:
+            return "backspace"
+        return None
+
     def attach_grid_cell(self, grid, key_event, col, row_index, width, height=1):
         if key_event.startswith(SPACER_KEY_PREFIX):
             spacer = Gtk.Box()
@@ -3257,8 +4046,14 @@ class VirtualKeyboard(Gtk.Window):
             grid.attach(spacer, col, row_index, width, height)
             return
 
-        label_text = self.get_button_label(key_event)
-        button = Gtk.Button(label=label_text)
+        icon_name = self._key_vector_icon_name(key_event)
+        label_text = "" if icon_name else self.get_button_label(key_event)
+        button = Gtk.Button() if icon_name else Gtk.Button(label=label_text)
+        if icon_name:
+            key_icon_px = max(15, min(30, int(round(self.key_font_size * 1.15))))
+            set_button_vector_icon(
+                button, icon_name, size_px=key_icon_px, color=self.get_active_icon_color()
+            )
         button.set_can_focus(False)
         button.set_focus_on_click(False)
         ctx = button.get_style_context()
@@ -3276,6 +4071,7 @@ class VirtualKeyboard(Gtk.Window):
         button.add_events(
             Gdk.EventMask.BUTTON_PRESS_MASK
             | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.BUTTON1_MOTION_MASK
             | Gdk.EventMask.POINTER_MOTION_MASK
             | Gdk.EventMask.ENTER_NOTIFY_MASK
             | Gdk.EventMask.LEAVE_NOTIFY_MASK
@@ -3297,6 +4093,8 @@ class VirtualKeyboard(Gtk.Window):
             }
             if key_event in tooltips:
                 button.set_tooltip_text(tooltips[key_event])
+        elif key_event == "Backspace" and icon_name:
+            button.set_tooltip_text("Backspace")
 
         self.key_buttons[key_event] = button
         if key_event in self.modifiers:
@@ -3314,7 +4112,7 @@ class VirtualKeyboard(Gtk.Window):
         if key_event == TV_ACTION_LAYER_NUMBERS:
             return "123"
         if key_event == TV_ACTION_OPTIONS:
-            return "⚙"
+            return ""
 
         special_labels = {
             "CapsLock": "Caps",
@@ -3337,7 +4135,7 @@ class VirtualKeyboard(Gtk.Window):
             **{f"KP_{digit}": str(digit) for digit in range(10)},
         }
         if key_event == "Backspace" and self.keyboard_mode == KEYBOARD_MODE_COMPACT_TV:
-            return "⌫"
+            return ""
         if key_event in special_labels:
             return special_labels[key_event]
 
@@ -3383,6 +4181,8 @@ class VirtualKeyboard(Gtk.Window):
 
     def update_key_labels(self):
         for key_label, button in self.key_buttons.items():
+            if self._key_vector_icon_name(key_label):
+                continue
             button.set_label(self.get_button_label(key_label))
 
     def update_modifier(self, key_event, value, locked=False):
@@ -3572,6 +4372,14 @@ class VirtualKeyboard(Gtk.Window):
         return False
 
     def on_window_button_release_event(self, widget, event):
+        if (
+            getattr(event, "button", 1) == 1
+            and self.gesture_controller is not None
+            and self.gesture_controller.active_gesture is not None
+        ):
+            self.gesture_controller.handle_key_release(widget, event)
+            self.schedule_key_button_visual_reset()
+            return False
         self.stop_all_active_keys()
         if self.gesture_controller is not None:
             self.gesture_controller.cancel_gesture()
@@ -3579,9 +4387,18 @@ class VirtualKeyboard(Gtk.Window):
         return False
 
     def on_window_leave_notify_event(self, widget, event):
+        detail = getattr(event, "detail", None)
+        mode = getattr(event, "mode", None)
+        if detail == Gdk.NotifyType.INFERIOR:
+            return False
+        if mode in (Gdk.CrossingMode.GRAB, Gdk.CrossingMode.UNGRAB):
+            return False
+        if (
+            self.gesture_controller is not None
+            and self.gesture_controller.active_gesture is not None
+        ):
+            return False
         self.stop_all_active_keys()
-        if self.gesture_controller is not None:
-            self.gesture_controller.cancel_gesture()
         self.schedule_key_button_visual_reset()
         return False
 
@@ -3865,23 +4682,40 @@ class VirtualKeyboard(Gtk.Window):
         if not self.current_word:
             return
 
-        completion = suggestion[len(self.current_word):]
-        if not completion:
-            return
-
         for modifier in MODIFIER_KEYS:
             if self.modifiers[modifier] and not self.locked_modifiers.get(modifier, False):
                 self.update_modifier(modifier, False)
 
-        for char in completion:
-            key_event, modifiers = self.character_to_key_event(char)
-            if key_event is None:
-                continue
-            self.backend.emit_key(key_event, modifiers)
+        empty_mods = {modifier: False for modifier in MODIFIER_KEYS}
+        is_exact_prefix = suggestion.lower().startswith(self.current_word.lower())
+        if is_exact_prefix:
+            completion = suggestion[len(self.current_word):]
+            if not completion:
+                return
+            for char in completion:
+                key_event, modifiers = self.character_to_key_event(char)
+                if key_event is None:
+                    continue
+                self.backend.emit_key(key_event, modifiers)
+            self.current_text_buffer = (self.current_text_buffer + completion)[-120:]
+        else:
+            # Spell-check or diacritic replacement: erase typed word, then type corrected word
+            erase_count = len(self.current_word)
+            for _ in range(erase_count):
+                self.backend.emit_key("Backspace", empty_mods)
+            for char in suggestion:
+                key_event, modifiers = self.character_to_key_event(char)
+                if key_event is None:
+                    continue
+                self.backend.emit_key(key_event, modifiers)
+            if self.current_text_buffer.lower().endswith(self.current_word.lower()):
+                self.current_text_buffer = (
+                    self.current_text_buffer[:-erase_count] + suggestion
+                )[-120:]
+            else:
+                self.current_text_buffer = (self.current_text_buffer + suggestion)[-120:]
 
-        self.current_text_buffer = (self.current_text_buffer + completion)[-120:]
         if self.auto_space_after_suggestion:
-            empty_mods = {modifier: False for modifier in MODIFIER_KEYS}
             self.backend.emit_key("Space", empty_mods)
             self.current_text_buffer = (self.current_text_buffer + " ")[-120:]
             self.current_word = ""
@@ -3930,10 +4764,12 @@ class VirtualKeyboard(Gtk.Window):
                 )
                 self.opacity = f"{self._parse_opacity(raw_opacity):.2f}"
                 self.text_color = self.config.get(
-                    "DEFAULT", "text_color", fallback="white"
+                    "DEFAULT", "text_color", fallback="#F5F5F7"
                 )
-                self.style_variant = self.config.get(
-                    "DEFAULT", "style_variant", fallback="classic"
+                self.style_variant = normalize_style_variant(
+                    self.config.get(
+                        "DEFAULT", "style_variant", fallback="graphite_dark"
+                    )
                 )
                 self.accent_color = self.config.get(
                     "DEFAULT", "accent_color", fallback=DEFAULT_ACCENT_COLOR
@@ -3954,6 +4790,14 @@ class VirtualKeyboard(Gtk.Window):
                     )
                 except ValueError:
                     self.font_scale = DEFAULT_FONT_SCALE
+                raw_fw = self.config.get(
+                    "DEFAULT", "font_weight", fallback=DEFAULT_FONT_WEIGHT
+                ).strip()
+                self.font_weight = (
+                    raw_fw
+                    if raw_fw in ("400", "500", "600", "700")
+                    else DEFAULT_FONT_WEIGHT
+                )
                 try:
                     self.key_corner_radius = max(
                         0,
@@ -3982,6 +4826,74 @@ class VirtualKeyboard(Gtk.Window):
                     )
                 except ValueError:
                     self.key_spacing = DEFAULT_KEY_SPACING
+                try:
+                    self.key_border_width = max(
+                        0,
+                        min(
+                            3,
+                            self.config.getint(
+                                "DEFAULT",
+                                "key_border_width",
+                                fallback=DEFAULT_KEY_BORDER_WIDTH,
+                            ),
+                        ),
+                    )
+                except ValueError:
+                    self.key_border_width = DEFAULT_KEY_BORDER_WIDTH
+                try:
+                    self.window_border_width = max(
+                        0,
+                        min(
+                            4,
+                            self.config.getint(
+                                "DEFAULT",
+                                "window_border_width",
+                                fallback=DEFAULT_WINDOW_BORDER_WIDTH,
+                            ),
+                        ),
+                    )
+                except ValueError:
+                    self.window_border_width = DEFAULT_WINDOW_BORDER_WIDTH
+                base_defaults = get_base_theme_colors(
+                    self.style_variant, self.bg_color, self.text_color
+                )
+                self.window_border_color = self.config.get(
+                    "DEFAULT",
+                    "window_border_color",
+                    fallback=base_defaults["window_border_color"],
+                )
+                self.key_shadow_enabled = self.config.getboolean(
+                    "DEFAULT",
+                    "key_shadow_enabled",
+                    fallback=DEFAULT_KEY_SHADOW_ENABLED,
+                )
+                self.use_custom_colors = self.config.getboolean(
+                    "DEFAULT",
+                    "use_custom_colors",
+                    fallback=False,
+                )
+                self.custom_window_bg = self.config.get(
+                    "DEFAULT", "custom_window_bg", fallback=base_defaults["window_bg"]
+                )
+                self.custom_key_bg = self.config.get(
+                    "DEFAULT", "custom_key_bg", fallback=base_defaults["key_bg"]
+                )
+                self.custom_modifier_bg = self.config.get(
+                    "DEFAULT",
+                    "custom_modifier_bg",
+                    fallback=base_defaults["modifier_bg"],
+                )
+                self.custom_text_color = self.config.get(
+                    "DEFAULT", "custom_text_color", fallback=base_defaults["text_color"]
+                )
+                self.custom_key_border_color = self.config.get(
+                    "DEFAULT",
+                    "custom_key_border_color",
+                    fallback=base_defaults["key_border_color"],
+                )
+                self.active_preset_name = self.config.get(
+                    "DEFAULT", "active_preset_name", fallback=""
+                )
                 self.gesture_enabled = self.config.getboolean(
                     "DEFAULT", "gesture_enabled", fallback=True
                 )
@@ -4139,8 +5051,20 @@ class VirtualKeyboard(Gtk.Window):
             "style_variant": self.style_variant,
             "accent_color": self.accent_color,
             "font_scale": f"{self.font_scale:.2f}",
+            "font_weight": str(self.font_weight),
             "key_corner_radius": str(self.key_corner_radius),
             "key_spacing": str(self.key_spacing),
+            "key_border_width": str(self.key_border_width),
+            "window_border_width": str(self.window_border_width),
+            "window_border_color": self.window_border_color,
+            "key_shadow_enabled": str(self.key_shadow_enabled),
+            "use_custom_colors": str(self.use_custom_colors),
+            "custom_window_bg": self.custom_window_bg,
+            "custom_key_bg": self.custom_key_bg,
+            "custom_modifier_bg": self.custom_modifier_bg,
+            "custom_text_color": self.custom_text_color,
+            "custom_key_border_color": self.custom_key_border_color,
+            "active_preset_name": self.active_preset_name,
             "text_prediction_enabled": str(self.text_prediction_enabled),
             "show_media_row": str(self.show_media_row),
             "show_current_text_bar": str(self.show_current_text_bar),

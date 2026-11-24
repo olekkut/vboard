@@ -1,14 +1,42 @@
+vboard (2.9.0-1) unstable; urgency=medium
+
+  * replace all emoji/symbol toolbar and key icons with theme-aware monochrome
+    vector SVG icons (vboard/icons/*.svg + Cairo fallback) with guaranteed contrast
+  * fix dark-theme text and icon contrast under KDE Breeze-GTK via explicit label
+    and cellview CSS color rules across all themes
+  * rename themes and accents to clean neutral names (Graphite Dark, Frost Light,
+    Cobalt Blue, Amber Orange, etc.) with seamless legacy config migration
+  * add unified crisp white keyboard outline border with configurable outline width
+    (0-4 px) and outline color across headerbar and keyboard body
+  * add full appearance customization and User Presets manager (~/.config/vboard/presets):
+    save/load/delete presets, 6 individual color pickers (window, keys, modifiers,
+    text/icons, key border, window outline), custom accent picker, key border width,
+    font weight, and keycap depth shadow toggle
+  * fix unpredictable resizing by debouncing responsive scale updates (50ms), setting
+    minimum window geometry hints, removing suggestion height locks, and adding
+    bottom-right resize grip + edge drag resizing
+  * fix spell check and word suggestions: bundle everyday fallback dictionaries for
+    EN/PL/UA/RU/AR, rank common words ahead of obscure entries, add diacritic-aware
+    matching and Damerau-Levenshtein typo correction, and replace misspelled words
+    cleanly with Backspace + full replacement
+  * fix swipe typing: show gesture overlay immediately on live toggle (no restart),
+    prevent intra-window INFERIOR/GRAB leave-notify events from canceling swipes,
+    accept cross-widget motion/release events, and support 2-key swipe routes
+  * map Linux XKB 'ara' layout code to curated Arabic ('ar') layout with 'AR' label
+
+ -- Aleksander Kutycki <74899889+olekkut@users.noreply.github.com>  Tue, 24 Nov 2026 23:45:00 +0000
+
 vboard (2.8.0-1) unstable; urgency=medium
 
-  * add Apple macOS Dark and Apple macOS Light keyboard themes with two-tone keycaps
-    and Apple Keyboard Viewer orange accent highlights for AltGr keys
+  * add Graphite Dark and Frost Light keyboard themes with two-tone keycaps
+    and amber accent highlights for AltGr keys
   * add responsive font, key, header, and suggestion scaling across all themes
   * add python-evdev uinput fallback backend and 250ms stuck-key watchdog with crash/hide release
   * add Arabic (ar) layout with AR short label, XKB sync, and Hunspell charset support
-  * add 4-tab Customize Vboard dialog inspired by macOS Accessibility Keyboard:
-    accent color, font scale, corner radius, key spacing, optional Media/System row,
-    Current Text preview bar, Press/Release activation, Sticky Modifier double-tap lock,
-    Auto-Capitalize, Auto-Space, Hover Dwell typing, and Inactivity Fade
+  * add 4-tab Customize Vboard dialog: accent color, font scale, corner radius,
+    key spacing, optional Media/System row, Current Text preview bar, Press/Release
+    activation, Sticky Modifier double-tap lock, Auto-Capitalize, Auto-Space,
+    Hover Dwell typing, and Inactivity Fade
 
  -- Aleksander Kutycki <74899889+olekkut@users.noreply.github.com>  Tue, 24 Nov 2026 22:50:00 +0000
 

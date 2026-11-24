@@ -34,8 +34,10 @@ install_data(
     'vboard/environment.py',
     'vboard/gesture.py',
     'vboard/gtk.py',
+    'vboard/icons.py',
     'vboard/input_backends.py',
     'vboard/layouts.py',
+    'vboard/presets.py',
     'vboard/suggestions.py',
     'vboard/system_layouts.py',
     'vboard/themes.py',
@@ -47,6 +49,16 @@ install_data(
 
 install_subdir(
   'vboard/layouts',
+  install_dir: vboard_python_dir,
+)
+
+install_subdir(
+  'vboard/icons',
+  install_dir: vboard_python_dir,
+)
+
+install_subdir(
+  'vboard/dictionaries',
   install_dir: vboard_python_dir,
 )
 

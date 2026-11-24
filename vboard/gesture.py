@@ -3,15 +3,16 @@ import math
 
 from .constants import SUGGESTION_LIMIT, SUPPORTED_WORD_CONNECTORS
 from .gtk import GLib, Gtk
+from .themes import parse_hex_rgb
 
 GESTURE_NEAREST_KEY_COUNT = 3
 GESTURE_SAMPLE_POINTS = 24
-GESTURE_MIN_PATH_KEYS = 3
-GESTURE_MIN_PATH_DISTANCE_FACTOR = 0.9
+GESTURE_MIN_PATH_KEYS = 2
+GESTURE_MIN_PATH_DISTANCE_FACTOR = 0.85
 GESTURE_POINT_SAMPLE_STEP_FACTOR = 0.12
-GESTURE_FEEDBACK_CLEAR_DELAY_MS = 180
-GESTURE_FEEDBACK_FRAME_DELAY_MS = 100
-GESTURE_FEEDBACK_SAMPLE_DISTANCE_FACTOR = 0.3
+GESTURE_FEEDBACK_CLEAR_DELAY_MS = 220
+GESTURE_FEEDBACK_FRAME_DELAY_MS = 24
+GESTURE_FEEDBACK_SAMPLE_DISTANCE_FACTOR = 0.25
 
 
 def key_event_to_gesture_char(key_event):
@@ -338,6 +339,7 @@ class GestureTypingController:
         self.grid_overlay.add_overlay(gesture_overlay)
         if hasattr(self.grid_overlay, "set_overlay_pass_through"):
             self.grid_overlay.set_overlay_pass_through(gesture_overlay, True)
+        gesture_overlay.show()
         return gesture_overlay
 
     def destroy(self):
@@ -387,18 +389,22 @@ class GestureTypingController:
         return True
 
     def handle_key_motion(self, widget, event):
-        if self.active_gesture is None or self.active_gesture["widget"] is not widget:
+        if self.active_gesture is None:
             return False
 
         self.record_gesture_motion(widget, event)
         return True
 
-    def handle_key_release(self, widget, event, key_event):
-        if self.active_gesture is None or self.active_gesture["widget"] is not widget:
+    def handle_key_release(self, widget, event, key_event=None):
+        if self.active_gesture is None:
             return False
 
         self.record_gesture_motion(widget, event)
-        self.finish_gesture(key_event)
+        fallback = (
+            self.active_gesture.get("fallback_key_event")
+            or key_event
+        )
+        self.finish_gesture(fallback)
         return True
 
     def cancel_gesture(self):
@@ -451,6 +457,7 @@ class GestureTypingController:
         self.refresh_layout_cache()
         self.active_gesture = {
             "widget": widget,
+            "fallback_key_event": key_event,
             "points": [],
             "key_path": [],
             "total_distance": 0.0,
@@ -675,18 +682,26 @@ class GestureTypingController:
         return False
 
     def on_gesture_overlay_draw(self, widget, cr):
-        if not self.visual_feedback_enabled or not self.visible_gesture_points:
+        if not self.visual_feedback_enabled or len(self.visible_gesture_points) < 2:
             return False
 
-        line_width = max(3.0, self.gesture_key_pitch * 0.12)
+        line_width = max(3.5, self.gesture_key_pitch * 0.13)
         start_x, start_y = self.visible_gesture_points[0]
+        accent_hex = getattr(self.keyboard, "accent_color", "#0A84FF")
+        r, g, b = parse_hex_rgb(accent_hex, fallback=(10, 132, 255))
+        rf, gf, bf = r / 255.0, g / 255.0, b / 255.0
+
         cr.set_line_cap(1)
         cr.set_line_join(1)
         cr.move_to(start_x, start_y)
         for point_x, point_y in self.visible_gesture_points[1:]:
             cr.line_to(point_x, point_y)
 
-        cr.set_source_rgba(0.46, 0.92, 1.0, 0.72)
+        cr.set_source_rgba(rf, gf, bf, 0.35)
+        cr.set_line_width(line_width * 1.9)
+        cr.stroke_preserve()
+
+        cr.set_source_rgba(rf, gf, bf, 0.88)
         cr.set_line_width(line_width)
         cr.stroke()
         return False

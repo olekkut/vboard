@@ -140,7 +140,7 @@ class VirtualKeyboardIntegrationTest(unittest.TestCase):
 
         self.window.set_keyboard_mode(KEYBOARD_MODE_COMPACT_TV)
         self.assertEqual(self.window.compact_tv_layer, COMPACT_TV_LAYER_ALPHA)
-        self.assertEqual(self.window.key_buttons["Backspace"].get_label(), "⌫")
+        self.assertIsNotNone(self.window.key_buttons["Backspace"].get_image())
         self.assertEqual(self.window.key_buttons["Delete"].get_label(), "Del")
         self.assertEqual(self.window.key_buttons[TV_ACTION_LANG].get_label(), "UA")
         self.assertTrue(
@@ -366,17 +366,55 @@ class VirtualKeyboardIntegrationTest(unittest.TestCase):
             with open(rules_path, encoding="utf-8") as handle:
                 self.assertIn("position=120,340", handle.read())
 
-    def test_apple_themes_responsive_scaling_and_altgr_orange_hints(self):
-        # Verify both Apple macOS themes load valid GTK3 CSS without errors
+    def test_graphite_and_frost_themes_responsive_scaling_and_altgr_hints(self):
+        from vboard.constants import ACCENT_COLOR_CHOICES, COLOR_CHOICES
+        from vboard.themes import build_theme_css
+
+        # Verify neutral naming (no third-party brand labels in theme or accent lists)
+        for label, _val in COLOR_CHOICES:
+            self.assertNotIn("apple", label.lower())
+            self.assertNotIn("macos", label.lower())
+        for label, _val in ACCENT_COLOR_CHOICES:
+            self.assertNotIn("apple", label.lower())
+
         for theme_label, expected_variant in (
-            ("Apple macOS Dark", "apple_dark"),
-            ("Apple macOS Light", "apple_light"),
+            ("Graphite Dark", "graphite_dark"),
+            ("Frost Light", "frost_light"),
         ):
             self.window.set_theme_by_label(theme_label, save=False)
             self.assertEqual(self.window.style_variant, expected_variant)
             self.assertEqual(self.window.get_active_theme_label(), theme_label)
 
-        # Verify responsive font scaling reacts to font_scale & window sizing
+        # Verify legacy style_variant config values migrate seamlessly
+        with open(self.window.CONFIG_FILE, "w", encoding="utf-8") as handle:
+            handle.write("[DEFAULT]\nstyle_variant = apple_dark\n")
+        self.window.read_settings()
+        self.assertEqual(self.window.style_variant, "graphite_dark")
+
+        # Verify explicit label color selectors for dark-theme contrast & crisp white outline border
+        css = build_theme_css(
+            style_variant="graphite_dark",
+            bg_color="0,0,0",
+            text_color="#F5F5F7",
+            theme_opacity=0.92,
+            desktop_env="KDE",
+            accent_hex="#0A84FF",
+            key_font_size=16,
+            secondary_key_font_size=12,
+            header_font_size=13,
+            suggestion_font_size=14,
+            key_radius=8,
+            key_spacing=3,
+            window_border_width=2,
+            window_border_color="#FFFFFF",
+        )
+        self.assertIn("headerbar button label", css)
+        self.assertIn("#media-bar button label", css)
+        self.assertIn("#combobox button.combo cellview", css)
+        self.assertIn("border-top: 2px solid rgba(255, 255, 255, 0.92)", css)
+        self.assertIn("border-bottom: 2px solid rgba(255, 255, 255, 0.92)", css)
+
+        # Verify responsive font scaling reacts to font_scale
         self.window.set_font_scale(0.80, save=False)
         small_font = self.window.key_font_size
         self.window.set_font_scale(1.50, save=False)
@@ -396,6 +434,116 @@ class VirtualKeyboardIntegrationTest(unittest.TestCase):
         self.assertFalse(
             self.window.key_buttons["A"].get_style_context().has_class("altgr-hint")
         )
+
+    def test_vector_svg_icons_and_user_presets_full_customization(self):
+        from vboard.gtk import Gtk
+
+        # Verify all media controls, menu button, and clear button use crisp Gtk.Image icons (no emoji labels)
+        self.assertEqual(len(self.window.media_buttons), 9)
+        for btn, _icon_name in self.window.media_buttons:
+            self.assertIsInstance(btn.get_image(), Gtk.Image)
+            self.assertEqual(btn.get_label() or "", "")
+        self.assertIsInstance(self.window.menu_button.get_image(), Gtk.Image)
+        self.assertIsInstance(self.window.current_text_clear_button.get_image(), Gtk.Image)
+
+        # Customize individual colors, borders, font weight, and save as a user preset
+        self.window.set_custom_color("custom_window_bg", "#101820", save=False)
+        self.window.set_custom_color("custom_key_bg", "#1F2A38", save=False)
+        self.window.set_custom_color("custom_text_color", "#E6F1FF", save=False)
+        self.window.set_window_border_width(3, save=False)
+        self.window.set_window_border_color("#00E5FF", save=False)
+        self.window.set_key_border_width(2, save=False)
+        self.window.set_font_weight("700", save=False)
+        self.window.set_key_shadow_enabled(False, save=False)
+        self.assertTrue(self.window.use_custom_colors)
+        self.assertEqual(self.window.get_active_icon_color(), "#E6F1FF")
+
+        saved_path = self.window.save_user_preset("Midnight Cyan")
+        self.assertIsNotNone(saved_path)
+        self.assertTrue(os.path.isfile(saved_path))
+
+        # Switch away to Frost Light, then reload custom preset and verify exact restoration
+        self.window.set_theme_by_label("Frost Light", save=False)
+        self.assertFalse(self.window.use_custom_colors)
+        self.assertEqual(self.window.get_active_icon_color(), "#1D1D1F")
+
+        loaded = self.window.load_user_preset("Midnight Cyan", save=False)
+        self.assertTrue(loaded)
+        self.assertTrue(self.window.use_custom_colors)
+        self.assertEqual(self.window.custom_window_bg, "#101820")
+        self.assertEqual(self.window.custom_key_bg, "#1F2A38")
+        self.assertEqual(self.window.custom_text_color, "#E6F1FF")
+        self.assertEqual(self.window.window_border_width, 3)
+        self.assertEqual(self.window.window_border_color, "#00E5FF")
+        self.assertEqual(self.window.key_border_width, 2)
+        self.assertEqual(self.window.font_weight, "700")
+        self.assertFalse(self.window.key_shadow_enabled)
+
+        self.assertTrue(self.window.delete_user_preset("Midnight Cyan"))
+        self.assertEqual(self.window.preset_manager.list_presets(), [])
+
+    def test_spell_check_replacement_swipe_typing_and_debounced_resize(self):
+        from vboard.gtk import Gdk
+
+        # 1. Spell-check typo replacement emits Backspace x len(typed) + corrected word
+        self.window.set_keyboard_layout("en", sync_system=False, save=False)
+        emitted = []
+        self.window.backend.emit_key = lambda key, mods: emitted.append(key)
+
+        self.window.current_word = "helo"
+        self.window.current_text_buffer = "helo"
+        fake_btn = type("FakeButton", (), {"get_label": lambda _s: "hello"})()
+        self.window.on_suggestion_clicked(fake_btn)
+        self.assertEqual(emitted[:4], ["Backspace", "Backspace", "Backspace", "Backspace"])
+        self.assertEqual(emitted[4:], ["H", "E", "L", "L", "O"])
+        self.assertEqual(self.window.current_text_buffer, "hello")
+
+        # 2. Swipe typing live toggle shows overlay and resists intra-window leave-notify
+        self.window.disable_gesture_typing(save=False)
+        self.assertIsNone(self.window.gesture_controller)
+        self.window.enable_gesture_typing(save=False)
+        self.assertIsNotNone(self.window.gesture_controller)
+        self.assertTrue(self.window.gesture_controller.gesture_overlay.get_visible())
+
+        # Start a synthetic gesture and ensure INFERIOR / GRAB leave-notify never cancels it
+        self.window.gesture_controller.active_gesture = {
+            "widget": self.window.key_buttons["H"],
+            "fallback_key_event": "H",
+            "points": [(10.0, 10.0), (50.0, 10.0)],
+            "key_path": ["h", "e", "l", "o"],
+            "total_distance": 120.0,
+        }
+        inferior_evt = type(
+            "LeaveEvt",
+            (),
+            {"detail": Gdk.NotifyType.INFERIOR, "mode": Gdk.CrossingMode.NORMAL},
+        )()
+        grab_evt = type(
+            "LeaveEvt",
+            (),
+            {"detail": Gdk.NotifyType.NONLINEAR, "mode": Gdk.CrossingMode.GRAB},
+        )()
+        self.window.on_window_leave_notify_event(self.window, inferior_evt)
+        self.assertIsNotNone(self.window.gesture_controller.active_gesture)
+        self.window.on_window_leave_notify_event(self.window, grab_evt)
+        self.assertIsNotNone(self.window.gesture_controller.active_gesture)
+        self.window.gesture_controller.cancel_gesture()
+
+        # 3. Debounced resize scheduling (no synchronous CSS thrash inside size-allocate)
+        self.window.on_grid_size_allocate(self.window.grid, None)
+        self.assertIsNotNone(self.window._scale_timer_id)
+        self.window._run_scheduled_scale_update()
+        self.assertIsNone(self.window._scale_timer_id)
+
+        # Edge detection helper finds corners & sides cleanly
+        self.window.resize(800, 300)
+        self.assertEqual(
+            self.window._detect_resize_edge(798, 298), Gdk.WindowEdge.SOUTH_EAST
+        )
+        self.assertEqual(
+            self.window._detect_resize_edge(2, 2), Gdk.WindowEdge.NORTH_WEST
+        )
+        self.assertIsNone(self.window._detect_resize_edge(400, 150))
 
     def test_sticky_modifier_lock_autocap_toolbars_dwell_fade_and_customize_dialog(self):
         from vboard.constants import INPUT_TRIGGER_RELEASE
@@ -448,6 +596,7 @@ class VirtualKeyboardIntegrationTest(unittest.TestCase):
         self.window.set_key_corner_radius(12, save=False)
         self.window.set_key_spacing(5, save=False)
         self.window.set_accent_color("#FF9F0A", save=False)
+        self.window.set_window_border_width(3, save=False)
         self.window.open_settings_dialog()
         self.assertIsNotNone(self.window.settings_dialog)
         self.window.settings_dialog.destroy()
@@ -456,10 +605,12 @@ class VirtualKeyboardIntegrationTest(unittest.TestCase):
         self.window.save_settings()
         self.window.key_corner_radius = 1
         self.window.accent_color = "#000000"
+        self.window.window_border_width = 0
         self.window.read_settings()
         self.assertEqual(self.window.key_corner_radius, 12)
         self.assertEqual(self.window.key_spacing, 5)
         self.assertEqual(self.window.accent_color, "#FF9F0A")
+        self.assertEqual(self.window.window_border_width, 3)
         self.assertEqual(self.window.input_trigger_mode, INPUT_TRIGGER_RELEASE)
         self.assertTrue(self.window.show_media_row)
         self.assertTrue(self.window.show_current_text_bar)

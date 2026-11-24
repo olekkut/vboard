@@ -25,6 +25,7 @@ DEFAULT_VBOARD_TO_XKB_LAYOUT = {
 
 XKB_FALLBACK_TO_VBOARD_LAYOUT = {
     "ar": "ar",
+    "ara": "ar",
     "au": "en",
     "ca": "en",
     "de": "de",
@@ -40,6 +41,7 @@ XKB_FALLBACK_TO_VBOARD_LAYOUT = {
 # Default XKB variant names that are identical to the empty ("") variant in xkb-data.
 DEFAULT_XKB_VARIANT_ALIASES = {
     ("ar", "basic"): "",
+    ("ara", "basic"): "",
     ("de", "basic"): "",
     ("fr", "basic"): "",
     ("pl", "basic"): "",
@@ -93,6 +95,8 @@ def build_xkb_lookup_maps(keyboard_layouts):
             xkb_variant = normalize_xkb_variant(xkb_layout, xkb_variant)
             vboard_to_xkb[layout_id] = xkb_layout
             exact_xkb_to_vboard[(xkb_layout, xkb_variant)] = layout_id
+            if xkb_layout == "ar":
+                exact_xkb_to_vboard.setdefault(("ara", xkb_variant), layout_id)
 
     return vboard_to_xkb, exact_xkb_to_vboard
 

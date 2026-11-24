@@ -11,23 +11,27 @@ It supports many themes, as you can see below:
 
 <img src="screenshots/stitched.gif" width="600">
 
-### Apple macOS Look & Accessibility Customization (v2.8.0)
+### Themes, Full Customization, User Presets & Vector Icons (v2.9.0)
 
-**Apple macOS Light — Polish `PL` with Apple Orange `AltGr` accent hints, System/Media row & Current Text preview bar:**
+**Graphite Dark — Compact for TV with crisp white outline border, monochrome vector media icons & `EN` / `PL` / `UA` / `RU` / `AR` switcher:**
 
-<img src="screenshots/apple_light_pl_altgr_toolbars.png" width="700">
+<img src="screenshots/graphite_dark_compact_tv_media.png" width="700">
 
-**Apple macOS Dark — Standard layout with System/Media row & `EN` / `PL` / `UA` / `RU` / `AR` fast switcher:**
+**Graphite Dark — Standard layout with spell-check suggestions, Current Text preview bar & vector controls:**
 
-<img src="screenshots/apple_dark_standard_media.png" width="700">
+<img src="screenshots/graphite_dark_standard_spellcheck.png" width="700">
 
-**Apple macOS Dark — Compact for TV with Arabic (`AR`) layout:**
+**Frost Light — Polish `PL` with amber `AltGr` diacritic hints, diacritic-aware suggestions & high-contrast dark vector icons:**
 
-<img src="screenshots/apple_dark_compact_tv_ar.png" width="700">
+<img src="screenshots/frost_light_pl_altgr.png" width="700">
 
-**4-Tab Customize Vboard Dialog (Appearance, Toolbars & Layout, Typing & Accessibility, Fade & Window):**
+**Custom User Preset (`Midnight Cyan`) — Custom background, keycaps, borders, outline & Arabic (`AR`) layout:**
 
-<img src="screenshots/customize_dialog_appearance.png" width="520">
+<img src="screenshots/custom_preset_midnight_cyan_ar.png" width="700">
+
+**4-Tab Customize Vboard Dialog (User Presets, Individual Color Pickers, Borders, Typography, Toolbars & Accessibility):**
+
+<img src="screenshots/customize_dialog_appearance.png" width="540">
 
 ### Compact for TV, High Contrast TV & Fast Language Switching (`EN` / `PL` / `UA` / `RU` / `AR`)
 

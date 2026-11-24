@@ -106,6 +106,30 @@ class HunspellSuggestionEngineTest(unittest.TestCase):
         ru_engine = HunspellSuggestionEngine("ru")
         self.assertEqual(ru_engine.get_suggestions("при", 5), ["привет", "пример"])
 
+    def test_spell_check_typo_and_diacritic_corrections(self):
+        en_engine = HunspellSuggestionEngine("en")
+        self.assertIn("hello", en_engine.get_suggestions("helo", 5))
+        self.assertIn("world", en_engine.get_suggestions("wrold", 5))
+
+        pl_engine = HunspellSuggestionEngine("pl")
+        self.assertIn("dziękuję", pl_engine.get_suggestions("dziek", 5))
+        self.assertIn("żółć", pl_engine.get_suggestions("zolc", 5))
+
+    def test_bundled_fallback_dictionaries_for_all_five_languages(self):
+        for lang, query, expected in (
+            ("en", "keyb", "keyboard"),
+            ("pl", "dziek", "dziękuję"),
+            ("uk", "прив", "привіт"),
+            ("ru", "прив", "привет"),
+            ("ar", "مرح", "مرحبا"),
+        ):
+            engine = HunspellSuggestionEngine(lang)
+            with mock.patch.object(engine, "find_dictionary_path", return_value=None):
+                suggestions = engine.get_suggestions(query, 5)
+            self.assertIsNotNone(engine.dictionary_path)
+            self.assertTrue(engine.dictionary_path.endswith(f"{lang}.txt"))
+            self.assertIn(expected, suggestions)
+
 
 if __name__ == "__main__":
     unittest.main()
