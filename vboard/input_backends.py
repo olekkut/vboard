@@ -1,4 +1,4 @@
-from .constants import MODIFIER_KEYS
+from .constants import FUNCTION_KEYS, MODIFIER_KEYS
 
 try:
     import uinput
@@ -100,6 +100,31 @@ class UInputBackend(InputBackend):
             "Super_L": uinput.KEY_LEFTMETA,
             "Super_R": uinput.KEY_RIGHTMETA,
         }
+        optional_keys = {
+            "Delete": ("KEY_DELETE",),
+            "Insert": ("KEY_INSERT",),
+            "Home": ("KEY_HOME",),
+            "End": ("KEY_END",),
+            "PageUp": ("KEY_PAGEUP",),
+            "PageDown": ("KEY_PAGEDOWN",),
+            "Print": ("KEY_SYSRQ", "KEY_PRINT"),
+            "ScrollLock": ("KEY_SCROLLLOCK",),
+            "Pause": ("KEY_PAUSE",),
+            "NumLock": ("KEY_NUMLOCK",),
+            "KP_Divide": ("KEY_KPSLASH",),
+            "KP_Multiply": ("KEY_KPASTERISK",),
+            "KP_Subtract": ("KEY_KPMINUS",),
+            "KP_Add": ("KEY_KPPLUS",),
+            "KP_Enter": ("KEY_KPENTER",),
+            "KP_Decimal": ("KEY_KPDOT",),
+            **{f"KP_{digit}": (f"KEY_KP{digit}",) for digit in range(10)},
+            **{function_key: (f"KEY_{function_key}",) for function_key in FUNCTION_KEYS},
+        }
+        for key_label, uinput_names in optional_keys.items():
+            key_code = self._uinput_key(*uinput_names, required=False)
+            if key_code is not None:
+                self.key_map[key_label] = key_code
+
         if less_key is not None:
             self.key_map["<"] = less_key
         self.modifier_order = list(MODIFIER_KEYS)

@@ -37,7 +37,9 @@ install_data(
     'vboard/input_backends.py',
     'vboard/layouts.py',
     'vboard/suggestions.py',
+    'vboard/system_layouts.py',
     'vboard/window.py',
+    'vboard/xkb_layouts.py',
   ),
   install_dir: vboard_python_dir,
 )

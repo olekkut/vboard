@@ -7,13 +7,27 @@ from .constants import (
     APP_DISPLAY_NAME,
     COMMAND_MODIFIER_KEYS,
     COLOR_CHOICES,
+    COMPACT_TV_LAYER_ALPHA,
+    COMPACT_TV_LAYER_NUMBERS,
     DEFAULT_KEYBOARD_LAYOUT,
     ENHANCED_BACKGROUND_PRESET,
+    HIGH_CONTRAST_TV_BACKGROUND_PRESET,
     KEY_WIDTHS,
+    KEYBOARD_MODE_CHOICES,
+    KEYBOARD_MODE_COMPACT_TV,
+    KEYBOARD_MODE_STANDARD,
     LIGHT_BACKGROUND_COLORS,
     MODIFIER_KEYS,
     ONBOARD_BACKGROUND_PRESET,
+    SPACER_KEY_PREFIX,
     SUGGESTION_LIMIT,
+    SUPPORTED_WORD_CONNECTORS,
+    TV_ACTION_HIDE,
+    TV_ACTION_KEYS,
+    TV_ACTION_LANG,
+    TV_ACTION_LAYER_ALPHA,
+    TV_ACTION_LAYER_NUMBERS,
+    TV_ACTION_OPTIONS,
     VERSION,
 )
 from .environment import DESKTOP_ENV
@@ -27,8 +41,20 @@ from .gtk import (
     Gtk,
 )
 from .input_backends import NullInputBackend, UInputBackend
-from .layouts import get_default_layout_key, get_layout_choices, load_keyboard_layouts
+from .layouts import (
+    build_compact_tv_alpha_cells,
+    build_compact_tv_numbers_cells,
+    get_default_layout_key,
+    get_layout_choices,
+    get_layout_short_label,
+    load_keyboard_layouts,
+)
 from .suggestions import HunspellSuggestionEngine
+from .system_layouts import (
+    SystemLayoutController,
+    get_next_layout_id,
+    resolve_system_entry_to_vboard_layout,
+)
 
 
 BUG_REPORT_URL = "https://github.com/archisman-panigrahi/vboard/issues/"
@@ -376,6 +402,16 @@ class StatusNotifierTrayIcon:
                 },
             ),
             (
+                11,
+                {
+                    "label": "Compact for TV Layout",
+                    "toggle-type": "checkmark",
+                    "toggle-state": int(
+                        self.window.keyboard_mode == KEYBOARD_MODE_COMPACT_TV
+                    ),
+                },
+            ),
+            (
                 self.MENU_SEPARATOR_ID,
                 {"type": "separator", "enabled": False},
             ),
@@ -471,6 +507,11 @@ class StatusNotifierTrayIcon:
             8: lambda: self.window.on_tray_about(None),
             9: lambda: self.window.on_tray_quit(None),
             10: lambda: self.window.open_bug_report_url(),
+            11: lambda: self.window.set_keyboard_mode(
+                KEYBOARD_MODE_STANDARD
+                if self.window.keyboard_mode == KEYBOARD_MODE_COMPACT_TV
+                else KEYBOARD_MODE_COMPACT_TV
+            ),
         }
         if item_id in actions:
             GLib.idle_add(actions[item_id])
@@ -554,6 +595,11 @@ class VirtualKeyboard(Gtk.Window):
         self.connect("delete-event", self.on_delete_event)
         self.connect("map-event", self.on_map_keep_above)
         self.connect("window-state-event", self.on_window_state_changed)
+        self.add_events(
+            Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK
+        )
+        self.connect("button-release-event", self.on_window_button_release_event)
+        self.connect("leave-notify-event", self.on_window_leave_notify_event)
         self._keep_above_retries = 0
         self._keep_above_timer_id = None
         self.width = 0
@@ -580,8 +626,13 @@ class VirtualKeyboard(Gtk.Window):
         self.gesture_enabled = True
         self.gesture_visual_feedback_enabled = True
         self.start_minimized = False
+        self.sync_system_layout = True
+        self.keyboard_mode = KEYBOARD_MODE_STANDARD
+        self.compact_tv_layer = COMPACT_TV_LAYER_ALPHA
         self.keyboard_layout = DEFAULT_KEYBOARD_LAYOUT
+        self.system_layout_controller = None
         self.read_settings()
+        self.initialize_system_layout_sync()
 
         self.modifiers = {mod_key: False for mod_key in MODIFIER_KEYS}
         self.color_map = dict(COLOR_CHOICES)
@@ -594,8 +645,11 @@ class VirtualKeyboard(Gtk.Window):
         self.buttons = []
         self.key_buttons = {}
         self.modifier_buttons = {}
+        self.layout_button = None
         self.current_word = ""
-        self.suggestion_engine = HunspellSuggestionEngine()
+        self.suggestion_engine = HunspellSuggestionEngine(
+            self.normalize_keyboard_layout(self.keyboard_layout)
+        )
         self.suggestion_buttons = []
         self.suggestion_override = None
         self.color_combobox = Gtk.ComboBoxText()
@@ -606,10 +660,15 @@ class VirtualKeyboard(Gtk.Window):
         self.tray_gesture_item = None
         self.tray_visual_feedback_item = None
         self.tray_start_minimized_item = None
+        self.tray_compact_tv_item = None
         self.tray_layout_items = {}
         self.settings_dialog = None
         self.settings_gesture_check = None
         self.settings_visual_feedback_check = None
+        self.settings_sync_layout_check = None
+        self.settings_layout_combo = None
+        self.settings_mode_combo = None
+        self._syncing_settings_dialog = False
         self.css_provider = Gtk.CssProvider()
         self._css_provider_registered = False
         self._last_suggestion_scale = None
@@ -670,9 +729,8 @@ class VirtualKeyboard(Gtk.Window):
 
         self.keyboard_layout = self.normalize_keyboard_layout(self.keyboard_layout)
         self.refresh_layout_character_lookup()
-
-        for row_index, keys in enumerate(self.get_active_key_rows()):
-            self.create_row(grid, row_index, keys)
+        self.populate_keyboard_grid()
+        self.update_layout_button()
 
         if self.gesture_enabled:
             self.enable_gesture_typing(sync_controls=False, save=False)
@@ -756,6 +814,7 @@ class VirtualKeyboard(Gtk.Window):
         self.tray_gesture_item = None
         self.tray_visual_feedback_item = None
         self.tray_start_minimized_item = None
+        self.tray_compact_tv_item = None
         self.tray_layout_items = {}
         if warning:
             print(warning)
@@ -787,6 +846,12 @@ class VirtualKeyboard(Gtk.Window):
             "toggled", self.on_tray_start_minimized_toggled
         )
         tray_menu.append(self.tray_start_minimized_item)
+
+        self.tray_compact_tv_item = Gtk.CheckMenuItem(label="Compact for TV Layout")
+        self.tray_compact_tv_item.connect(
+            "toggled", self.on_tray_compact_tv_toggled
+        )
+        tray_menu.append(self.tray_compact_tv_item)
 
         tray_menu.append(Gtk.SeparatorMenuItem())
 
@@ -902,6 +967,14 @@ class VirtualKeyboard(Gtk.Window):
         if not self._syncing_tray_items:
             self.set_start_minimized(widget.get_active())
 
+    def on_tray_compact_tv_toggled(self, widget):
+        if not self._syncing_tray_items:
+            self.set_keyboard_mode(
+                KEYBOARD_MODE_COMPACT_TV
+                if widget.get_active()
+                else KEYBOARD_MODE_STANDARD
+            )
+
     def on_tray_layout_toggled(self, widget, layout_key):
         if not self._syncing_tray_items and widget.get_active():
             self.set_keyboard_layout(layout_key)
@@ -920,6 +993,10 @@ class VirtualKeyboard(Gtk.Window):
                 self.tray_visual_feedback_item.set_sensitive(self.gesture_enabled)
             if self.tray_start_minimized_item is not None:
                 self.tray_start_minimized_item.set_active(self.start_minimized)
+            if self.tray_compact_tv_item is not None:
+                self.tray_compact_tv_item.set_active(
+                    self.keyboard_mode == KEYBOARD_MODE_COMPACT_TV
+                )
             for layout_key, item in self.tray_layout_items.items():
                 item.set_active(layout_key == self.keyboard_layout)
         finally:
@@ -932,6 +1009,11 @@ class VirtualKeyboard(Gtk.Window):
             return layout_key
         return get_default_layout_key(self.keyboard_layouts)
 
+    def normalize_keyboard_mode(self, mode):
+        if mode == KEYBOARD_MODE_COMPACT_TV:
+            return KEYBOARD_MODE_COMPACT_TV
+        return KEYBOARD_MODE_STANDARD
+
     def get_layout_config(self):
         return self.keyboard_layouts[self.keyboard_layout]
 
@@ -943,6 +1025,209 @@ class VirtualKeyboard(Gtk.Window):
 
     def get_active_shifted_map(self):
         return self.get_layout_config()["shifted"]
+
+    def get_active_altgr_map(self):
+        return self.get_layout_config().get("altgr", {})
+
+    def get_active_altgr_shifted_map(self):
+        return self.get_layout_config().get("altgr_shifted", {})
+
+    def get_current_layout_short_label(self):
+        return get_layout_short_label(self.keyboard_layout, self.keyboard_layouts)
+
+    def initialize_system_layout_sync(self):
+        self.close_system_layout_sync()
+        controller = SystemLayoutController.create(
+            self.keyboard_layouts,
+            on_layout_changed=self.on_system_layout_changed,
+        )
+        if controller is None:
+            return
+
+        self.system_layout_controller = controller
+        if self.sync_system_layout:
+            try:
+                current_layout = controller.get_current_vboard_layout()
+            except (GLib.Error, OSError, RuntimeError) as exc:
+                print(f"Warning: Could not read active system keyboard layout ({exc}).")
+                return
+            if current_layout in self.keyboard_layouts:
+                self.keyboard_layout = current_layout
+
+    def close_system_layout_sync(self):
+        if self.system_layout_controller is not None:
+            try:
+                self.system_layout_controller.close()
+            except Exception:
+                pass
+            self.system_layout_controller = None
+
+    def on_system_layout_changed(self, layout_key, entry=None):
+        if not self.sync_system_layout:
+            return
+        if layout_key in self.keyboard_layouts:
+            self.set_keyboard_layout(layout_key, sync_system=False, save=False)
+
+    def set_sync_system_layout(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self.sync_system_layout:
+            return
+
+        self.sync_system_layout = enabled
+        if enabled:
+            if self.system_layout_controller is None:
+                self.initialize_system_layout_sync()
+            elif self.system_layout_controller is not None:
+                try:
+                    current_layout = (
+                        self.system_layout_controller.get_current_vboard_layout()
+                    )
+                except (GLib.Error, OSError, RuntimeError):
+                    current_layout = None
+                if current_layout in self.keyboard_layouts:
+                    self.set_keyboard_layout(
+                        current_layout, sync_system=False, save=False
+                    )
+        self.update_layout_button()
+        self.sync_settings_dialog_controls()
+        self.save_settings()
+
+    def update_layout_button(self):
+        short_label = self.get_current_layout_short_label()
+        layout_config = self.keyboard_layouts.get(self.keyboard_layout, {})
+        layout_label = layout_config.get("label", self.keyboard_layout)
+
+        if self.layout_button is not None:
+            self.layout_button.set_label(short_label)
+            tooltip = f"Keyboard layout: {layout_label} ({short_label})"
+            if self.sync_system_layout and self.system_layout_controller is not None:
+                tooltip += "\nClick to switch system layout, right-click to choose"
+            else:
+                tooltip += "\nClick to switch layout, right-click to choose"
+            self.layout_button.set_tooltip_text(tooltip)
+
+        tv_lang_button = self.key_buttons.get(TV_ACTION_LANG)
+        if tv_lang_button is not None:
+            tv_lang_button.set_label(short_label)
+
+    def cycle_keyboard_layout(self):
+        if self.sync_system_layout and self.system_layout_controller is not None:
+            try:
+                cycled = self.system_layout_controller.cycle_next_layout()
+            except (GLib.Error, OSError, RuntimeError) as exc:
+                print(f"Warning: Could not cycle system keyboard layout ({exc}).")
+                cycled = None
+            if cycled is not None:
+                _next_entry, next_layout_id = cycled
+                if next_layout_id in self.keyboard_layouts:
+                    self.set_keyboard_layout(
+                        next_layout_id, sync_system=False, save=True
+                    )
+                return
+
+        available = [layout_key for layout_key, _label in self.keyboard_layout_choices]
+        next_layout = get_next_layout_id(self.keyboard_layout, available)
+        if next_layout is not None:
+            self.set_keyboard_layout(next_layout, sync_system=self.sync_system_layout)
+
+    def select_system_layout_entry(self, entry):
+        if self.system_layout_controller is None:
+            return
+        try:
+            switched = self.system_layout_controller.set_layout_by_index(entry.index)
+        except (GLib.Error, OSError, RuntimeError) as exc:
+            print(f"Warning: Could not switch system keyboard layout ({exc}).")
+            switched = False
+
+        layout_id = resolve_system_entry_to_vboard_layout(entry, self.keyboard_layouts)
+        if layout_id in self.keyboard_layouts:
+            self.set_keyboard_layout(layout_id, sync_system=not switched, save=True)
+
+    def on_layout_button_press_event(self, widget, event):
+        if event.button == 1:
+            self.cycle_keyboard_layout()
+            return True
+        if event.button == 3:
+            self.popup_layout_menu(widget, event)
+            return True
+        return False
+
+    def popup_layout_menu(self, widget, event=None):
+        menu = Gtk.Menu()
+        shown_layout_ids = set()
+
+        system_entries = ()
+        current_system_index = None
+        if self.system_layout_controller is not None:
+            try:
+                self.system_layout_controller.refresh()
+                system_entries = self.system_layout_controller.get_system_entries()
+                current_system_index = self.system_layout_controller.get_current_index()
+            except (GLib.Error, OSError, RuntimeError):
+                system_entries = ()
+
+        if system_entries:
+            first_radio = None
+            for entry in system_entries:
+                resolved_id = resolve_system_entry_to_vboard_layout(
+                    entry, self.keyboard_layouts
+                )
+                if resolved_id is not None:
+                    shown_layout_ids.add(resolved_id)
+                short_code = (
+                    get_layout_short_label(resolved_id, self.keyboard_layouts)
+                    if resolved_id
+                    else entry.xkb_layout[:3].upper()
+                )
+                label_text = f"{short_code} - {entry.display_name}"
+                if first_radio is None:
+                    item = Gtk.RadioMenuItem.new_with_label(None, label_text)
+                    first_radio = item
+                else:
+                    item = Gtk.RadioMenuItem.new_with_label_from_widget(
+                        first_radio, label_text
+                    )
+                is_active = (
+                    entry.index == current_system_index
+                    if current_system_index is not None
+                    else (resolved_id == self.keyboard_layout)
+                )
+                item.set_active(is_active)
+                item.connect(
+                    "activate",
+                    lambda menu_item, selected=entry: (
+                        self.select_system_layout_entry(selected)
+                        if menu_item.get_active()
+                        else None
+                    ),
+                )
+                menu.append(item)
+
+        extra_choices = [
+            (layout_key, layout_label)
+            for layout_key, layout_label in self.keyboard_layout_choices
+            if layout_key not in shown_layout_ids
+        ]
+        if extra_choices:
+            if system_entries:
+                menu.append(Gtk.SeparatorMenuItem())
+            for layout_key, layout_label in extra_choices:
+                short_code = get_layout_short_label(layout_key, self.keyboard_layouts)
+                item = Gtk.CheckMenuItem(label=f"{short_code} - {layout_label}")
+                item.set_active(layout_key == self.keyboard_layout)
+                item.connect(
+                    "activate",
+                    lambda _menu_item, key=layout_key: self.set_keyboard_layout(key),
+                )
+                menu.append(item)
+
+        menu.show_all()
+        menu.popup_at_widget(
+            widget,
+            Gdk.Gravity.SOUTH_WEST,
+            Gdk.Gravity.NORTH_WEST,
+            event,
+        )
 
     def sync_caps_lock_from_system(self, keymap=None, connect=False):
         try:
@@ -962,6 +1247,8 @@ class VirtualKeyboard(Gtk.Window):
         lookup = {}
         key_labels = self.get_active_key_labels()
         shifted_map = self.get_active_shifted_map()
+        altgr_map = self.get_active_altgr_map()
+        altgr_shifted_map = self.get_active_altgr_shifted_map()
 
         for row in self.get_active_key_rows():
             for key_event in row:
@@ -971,35 +1258,160 @@ class VirtualKeyboard(Gtk.Window):
                 key_label = key_labels.get(key_event, key_event)
                 if len(key_label) == 1:
                     if key_label.isalpha():
-                        lookup[key_label.lower()] = (key_event, False)
-                        lookup[key_label.upper()] = (key_event, True)
+                        lookup[key_label.lower()] = (key_event, False, False)
+                        lookup[key_label.upper()] = (key_event, True, False)
                     else:
-                        lookup[key_label] = (key_event, False)
+                        lookup[key_label] = (key_event, False, False)
 
                 shifted_label = shifted_map.get(key_event)
                 if shifted_label is not None:
-                    lookup[shifted_label] = (key_event, True)
+                    lookup[shifted_label] = (key_event, True, False)
+
+                altgr_label = altgr_map.get(key_event)
+                if altgr_label is not None and len(altgr_label) == 1:
+                    if altgr_label.isalpha():
+                        lookup.setdefault(
+                            altgr_label.lower(), (key_event, False, True)
+                        )
+                        lookup.setdefault(
+                            altgr_label.upper(), (key_event, True, True)
+                        )
+                    else:
+                        lookup.setdefault(altgr_label, (key_event, False, True))
+
+                altgr_shifted_label = altgr_shifted_map.get(key_event)
+                if altgr_shifted_label is not None and len(altgr_shifted_label) == 1:
+                    lookup.setdefault(altgr_shifted_label, (key_event, True, True))
 
         self.layout_character_lookup = lookup
+
+    def populate_keyboard_grid(self):
+        self.key_buttons = {}
+        self.modifier_buttons = {}
+
+        if self.keyboard_mode == KEYBOARD_MODE_COMPACT_TV:
+            if self.compact_tv_layer == COMPACT_TV_LAYER_NUMBERS:
+                cells = build_compact_tv_numbers_cells()
+            else:
+                cells = build_compact_tv_alpha_cells(self.get_layout_config())
+            for key_event, col, row_index, width, height in cells:
+                self.attach_grid_cell(
+                    self.grid, key_event, col, row_index, width, height
+                )
+            self.update_compact_tv_layer_styles()
+        else:
+            for row_index, keys in enumerate(self.get_active_key_rows()):
+                self.create_row(self.grid, row_index, keys)
+
+        self.apply_modifier_styles()
 
     def rebuild_keyboard_grid(self):
         for child in self.grid.get_children():
             self.grid.remove(child)
 
-        self.key_buttons = {}
-        self.modifier_buttons = {}
-        for row_index, keys in enumerate(self.get_active_key_rows()):
-            self.create_row(self.grid, row_index, keys)
-
+        self.populate_keyboard_grid()
         self.grid.show_all()
+        self.update_layout_button()
         self.update_suggestion_bar_scale()
 
-    def set_keyboard_layout(self, layout_key):
+    def set_keyboard_mode(self, mode, save=True):
+        normalized_mode = self.normalize_keyboard_mode(mode)
+        if normalized_mode == self.keyboard_mode:
+            return
+
+        self.keyboard_mode = normalized_mode
+        self.compact_tv_layer = COMPACT_TV_LAYER_ALPHA
+        self.rebuild_keyboard_grid()
+        if self.gesture_controller is not None:
+            self.gesture_controller.refresh_layout_cache()
+            self.gesture_controller.queue_overlay_draw()
+        self.sync_tray_items()
+        self.sync_settings_dialog_controls()
+        if save:
+            self.save_settings()
+
+    def set_compact_tv_layer(self, layer):
+        if layer not in (COMPACT_TV_LAYER_ALPHA, COMPACT_TV_LAYER_NUMBERS):
+            return
+        if layer == self.compact_tv_layer:
+            return
+
+        self.compact_tv_layer = layer
+        self.rebuild_keyboard_grid()
+        if self.gesture_controller is not None:
+            self.gesture_controller.refresh_layout_cache()
+            self.gesture_controller.queue_overlay_draw()
+
+    def update_compact_tv_layer_styles(self):
+        alpha_btn = self.key_buttons.get(TV_ACTION_LAYER_ALPHA)
+        numbers_btn = self.key_buttons.get(TV_ACTION_LAYER_NUMBERS)
+        if alpha_btn is not None:
+            ctx = alpha_btn.get_style_context()
+            if self.compact_tv_layer == COMPACT_TV_LAYER_ALPHA:
+                ctx.add_class("active-layer")
+            else:
+                ctx.remove_class("active-layer")
+        if numbers_btn is not None:
+            ctx = numbers_btn.get_style_context()
+            if self.compact_tv_layer == COMPACT_TV_LAYER_NUMBERS:
+                ctx.add_class("active-layer")
+            else:
+                ctx.remove_class("active-layer")
+
+    def apply_modifier_styles(self):
+        for mod_key, active in self.modifiers.items():
+            button = self.modifier_buttons.get(mod_key)
+            if button is None:
+                continue
+            style_context = button.get_style_context()
+            modifier_class = (
+                "active-command-modifier"
+                if mod_key.startswith(("Shift", "Ctrl", "Alt"))
+                else "active-modifier"
+            )
+            style_context.remove_class("active-modifier")
+            style_context.remove_class("active-command-modifier")
+            if active:
+                style_context.add_class(modifier_class)
+
+        caps_button = self.key_buttons.get("CapsLock")
+        if caps_button is not None:
+            style_context = caps_button.get_style_context()
+            style_context.remove_class("active-modifier")
+            style_context.remove_class("active-command-modifier")
+            if self.caps_lock_active:
+                style_context.add_class("active-command-modifier")
+
+    def set_keyboard_layout(self, layout_key, sync_system=True, save=True):
         normalized_layout = self.normalize_keyboard_layout(layout_key)
+        if (
+            sync_system
+            and self.sync_system_layout
+            and self.system_layout_controller is not None
+        ):
+            try:
+                synced = self.system_layout_controller.set_vboard_layout(
+                    normalized_layout
+                )
+            except (GLib.Error, OSError, RuntimeError) as exc:
+                print(
+                    f"Warning: Could not synchronize system keyboard layout ({exc})."
+                )
+                synced = False
+            if not synced:
+                print(
+                    "Warning: Layout is not configured in system layouts; "
+                    "switching Vboard without system layout synchronization: "
+                    f"{normalized_layout}"
+                )
+
         if normalized_layout == self.keyboard_layout:
+            self.update_layout_button()
+            self.sync_settings_dialog_controls()
             return
 
         self.keyboard_layout = normalized_layout
+        self.suggestion_engine.set_layout(normalized_layout)
         self.refresh_layout_character_lookup()
         self.rebuild_keyboard_grid()
         if self.gesture_controller is not None:
@@ -1009,9 +1421,28 @@ class VirtualKeyboard(Gtk.Window):
         self.clear_suggestion_override(update=False)
         self.current_word = ""
         self.update_suggestions()
+        if self.text_prediction_enabled:
+            GLib.idle_add(self.preload_suggestions)
+        self.update_layout_button()
         self.sync_tray_items()
+        self.sync_settings_dialog_controls()
 
-        self.save_settings()
+        if save:
+            self.save_settings()
+
+    def sync_settings_dialog_controls(self):
+        if self.settings_dialog is None:
+            return
+        self._syncing_settings_dialog = True
+        try:
+            if self.settings_sync_layout_check is not None:
+                self.settings_sync_layout_check.set_active(self.sync_system_layout)
+            if self.settings_layout_combo is not None:
+                self.settings_layout_combo.set_active_id(self.keyboard_layout)
+            if self.settings_mode_combo is not None:
+                self.settings_mode_combo.set_active_id(self.keyboard_mode)
+        finally:
+            self._syncing_settings_dialog = False
 
     def sync_gesture_controls(self):
         if (
@@ -1112,6 +1543,7 @@ class VirtualKeyboard(Gtk.Window):
 
     def on_tray_quit(self, widget):
         self.exiting = True
+        self.close_system_layout_sync()
         self.save_settings()
         self.clear_tray_icon()
         self.destroy()
@@ -1126,6 +1558,7 @@ class VirtualKeyboard(Gtk.Window):
         if self.exiting:
             return False
         if self.tray_icon is None:
+            self.close_system_layout_sync()
             return False
         self.save_settings()
         self.hide()
@@ -1134,9 +1567,22 @@ class VirtualKeyboard(Gtk.Window):
 
     def create_settings(self):
         self.esc_button = Gtk.Button(label="ESC")
+        self.esc_button.set_can_focus(False)
+        self.esc_button.set_focus_on_click(False)
         self.esc_button.connect("clicked", lambda widget: self.emit_key("Esc"))
         self.esc_button.set_name("esc-button")
         self.header.pack_start(self.esc_button)
+
+        self.layout_button = Gtk.Button(label=self.get_current_layout_short_label())
+        self.layout_button.set_can_focus(False)
+        self.layout_button.set_focus_on_click(False)
+        self.layout_button.set_name("layout-button")
+        self.layout_button.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.layout_button.connect(
+            "button-press-event", self.on_layout_button_press_event
+        )
+        self.header.pack_start(self.layout_button)
+        self.update_layout_button()
 
         self.create_button("☰", self.change_visibility, callbacks=1)
         self.create_button(
@@ -1158,6 +1604,8 @@ class VirtualKeyboard(Gtk.Window):
 
         if self.style_variant == "onboard":
             active_label = "Onboard Droid Theme"
+        elif self.style_variant == "high_contrast_tv":
+            active_label = "High Contrast TV"
         else:
             active_label = None
 
@@ -1234,14 +1682,35 @@ class VirtualKeyboard(Gtk.Window):
         )
         grid.attach(start_minimized_check, 0, 3, 2, 1)
 
+        sync_layout_check = Gtk.CheckButton(label="Sync with System Keyboard Layout")
+        sync_layout_check.set_active(self.sync_system_layout)
+        sync_layout_check.connect("toggled", self.on_settings_sync_layout_toggled)
+        grid.attach(sync_layout_check, 0, 4, 2, 1)
+        self.settings_sync_layout_check = sync_layout_check
+
         layout_label = Gtk.Label(label="Keyboard Layout", xalign=0)
         layout_combo = Gtk.ComboBoxText()
         for layout_key, layout_name in self.keyboard_layout_choices:
             layout_combo.append(layout_key, layout_name)
+        if self.keyboard_layout not in dict(self.keyboard_layout_choices):
+            active_config = self.keyboard_layouts.get(self.keyboard_layout)
+            if active_config is not None:
+                layout_combo.append(self.keyboard_layout, active_config["label"])
         layout_combo.set_active_id(self.keyboard_layout)
         layout_combo.connect("changed", self.on_settings_layout_changed)
-        grid.attach(layout_label, 0, 4, 1, 1)
-        grid.attach(layout_combo, 1, 4, 1, 1)
+        grid.attach(layout_label, 0, 5, 1, 1)
+        grid.attach(layout_combo, 1, 5, 2, 1)
+        self.settings_layout_combo = layout_combo
+
+        mode_label = Gtk.Label(label="Keyboard Style", xalign=0)
+        mode_combo = Gtk.ComboBoxText()
+        for mode_id, mode_name in KEYBOARD_MODE_CHOICES:
+            mode_combo.append(mode_id, mode_name)
+        mode_combo.set_active_id(self.keyboard_mode)
+        mode_combo.connect("changed", self.on_settings_mode_changed)
+        grid.attach(mode_label, 0, 6, 1, 1)
+        grid.attach(mode_combo, 1, 6, 2, 1)
+        self.settings_mode_combo = mode_combo
 
         about_button = Gtk.Button(label="About")
         about_button.connect("clicked", self.on_settings_about_clicked)
@@ -1249,9 +1718,9 @@ class VirtualKeyboard(Gtk.Window):
         report_bugs_button.connect("clicked", self.on_settings_report_bugs_clicked)
         quit_button = Gtk.Button(label="Quit")
         quit_button.connect("clicked", self.on_settings_quit_clicked)
-        grid.attach(about_button, 0, 5, 1, 1)
-        grid.attach(report_bugs_button, 1, 5, 1, 1)
-        grid.attach(quit_button, 2, 5, 1, 1)
+        grid.attach(about_button, 0, 7, 1, 1)
+        grid.attach(report_bugs_button, 1, 7, 1, 1)
+        grid.attach(quit_button, 2, 7, 1, 1)
 
         self.settings_dialog = dialog
         dialog.show_all()
@@ -1263,6 +1732,9 @@ class VirtualKeyboard(Gtk.Window):
         self.settings_dialog = None
         self.settings_gesture_check = None
         self.settings_visual_feedback_check = None
+        self.settings_sync_layout_check = None
+        self.settings_layout_combo = None
+        self.settings_mode_combo = None
 
     def on_settings_prediction_toggled(self, widget):
         self.set_text_prediction_enabled(widget.get_active())
@@ -1281,10 +1753,23 @@ class VirtualKeyboard(Gtk.Window):
     def on_settings_start_minimized_toggled(self, widget):
         self.set_start_minimized(widget.get_active())
 
+    def on_settings_sync_layout_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_sync_system_layout(widget.get_active())
+
     def on_settings_layout_changed(self, widget):
+        if self._syncing_settings_dialog:
+            return
         layout_key = widget.get_active_id()
         if layout_key is not None:
             self.set_keyboard_layout(layout_key)
+
+    def on_settings_mode_changed(self, widget):
+        if self._syncing_settings_dialog:
+            return
+        mode_id = widget.get_active_id()
+        if mode_id is not None:
+            self.set_keyboard_mode(mode_id)
 
     def on_settings_about_clicked(self, widget):
         self.on_tray_about(widget)
@@ -1459,6 +1944,8 @@ class VirtualKeyboard(Gtk.Window):
         if selected_color is not None:
             if selected_color == ONBOARD_BACKGROUND_PRESET:
                 self.style_variant = "onboard"
+            elif selected_color == HIGH_CONTRAST_TV_BACKGROUND_PRESET:
+                self.style_variant = "high_contrast_tv"
             elif (
                 isinstance(selected_color, tuple)
                 and len(selected_color) == 2
@@ -1585,7 +2072,7 @@ class VirtualKeyboard(Gtk.Window):
             #vboard-main headerbar button {{
                 min-width: 40px;
                 min-height: 34px;
-                padding: 0px;
+                padding: 0px 8px;
                 border: 1px solid {rgba((13, 21, 33), 1.0)};
                 border-radius: 8px;
                 margin: 0px 2px;
@@ -1643,6 +2130,10 @@ class VirtualKeyboard(Gtk.Window):
                 font-weight: 500;
             }}
 
+            #vboard-main #grid button.compact-label label {{
+                font-size: 15px;
+            }}
+
             #vboard-main #grid button {{
                 min-width: 10px;
                 min-height: 52px;
@@ -1660,6 +2151,23 @@ class VirtualKeyboard(Gtk.Window):
                     inset 0 1px {rgba((255, 255, 255), 0.09)},
                     inset 0 -1px {rgba((0, 0, 0), 0.18)},
                     0 1px 2px {rgba((0, 0, 0), 0.25)};
+            }}
+
+            #vboard-main #grid button.sidebar-key {{
+                background-image: linear-gradient(
+                    to bottom,
+                    {rgba((60, 72, 95), 1.0)},
+                    {rgba((33, 42, 59), 1.0)}
+                );
+            }}
+
+            #vboard-main #grid button.sidebar-key.active-layer {{
+                border: 1px solid {rgba((102, 165, 232), 1.0)};
+                background-image: linear-gradient(
+                    to bottom,
+                    {rgba((53, 114, 184), 1.0)},
+                    {rgba((33, 81, 140), 1.0)}
+                );
             }}
 
             #vboard-main button {{
@@ -1711,8 +2219,9 @@ class VirtualKeyboard(Gtk.Window):
                 color: {rgba((247, 248, 251), 1.0)};
             }}
 
-            #vboard-main #esc-button {{
-                min-width: 60px;
+            #vboard-main #esc-button,
+            #vboard-main #layout-button {{
+                min-width: 54px;
                 min-height: 34px;
                 border: 1px solid {rgba((17, 24, 36), 1.0)};
                 border-radius: 8px;
@@ -1726,7 +2235,12 @@ class VirtualKeyboard(Gtk.Window):
                 box-shadow: inset 0 1px {rgba((255, 255, 255), 0.1)};
             }}
 
-            #vboard-main #esc-button:hover {{
+            #vboard-main #layout-button label {{
+                font-weight: 700;
+            }}
+
+            #vboard-main #esc-button:hover,
+            #vboard-main #layout-button:hover {{
                 border: 1px solid {rgba((142, 166, 199), 1.0)};
                 background-image: linear-gradient(
                     to bottom,
@@ -1787,6 +2301,222 @@ class VirtualKeyboard(Gtk.Window):
                     {rgba((59, 73, 96), 1.0)},
                     {rgba((38, 49, 68), 1.0)}
                 );
+            }}
+            """
+        elif self.style_variant == "high_contrast_tv":
+            # Modeled on Onboard's Charcoal High Contrast TV theme:
+            # flat keys, zero drop shadows, bold Liberation Sans labels, crisp borders.
+            css = f"""
+            #vboard-main {{
+                background-color: {rgba((22, 22, 22), 1.0)};
+                background-image: none;
+                border: 2px solid {rgba((110, 110, 110), 1.0)};
+                border-radius: 12px;
+                color: #FFFFFF;
+                font-family: "Liberation Sans", sans-serif;
+            }}
+
+            #vboard-main headerbar {{
+                background-color: {rgba((30, 30, 30), 1.0)};
+                background-image: none;
+                border: 0px;
+                border-bottom: 2px solid {rgba((88, 88, 88), 1.0)};
+                box-shadow: none;
+                padding: 4px 6px;
+            }}
+
+            #vboard-main headerbar button {{
+                min-width: 42px;
+                min-height: 36px;
+                padding: 0px 8px;
+                border: 2px solid {rgba((150, 150, 150), 1.0)};
+                border-radius: 9px;
+                margin: 0px 2px;
+                color: #FFFFFF;
+                background-color: {rgba((48, 48, 48), 1.0)};
+                background-image: none;
+                box-shadow: none;
+                transition: none;
+            }}
+
+            #vboard-main headerbar .titlebutton {{
+                min-width: 44px;
+                min-height: 36px;
+            }}
+
+            #vboard-main headerbar button:hover,
+            #vboard-main #combobox button.combo:hover {{
+                border: 2px solid #FFD600;
+                background-color: {rgba((72, 72, 72), 1.0)};
+                background-image: none;
+            }}
+
+            #vboard-main headerbar button:active,
+            #vboard-main #combobox button.combo:active {{
+                border: 2px solid #FFD600;
+                background-color: #FFD600;
+                background-image: none;
+            }}
+
+            #vboard-main headerbar button:active label {{
+                color: #111111;
+            }}
+
+            #vboard-main headerbar button label {{
+                color: #FFFFFF;
+                font-family: "Liberation Sans", sans-serif;
+                font-weight: 700;
+            }}
+
+            #vboard-main headerbar .title {{
+                color: #E6E6E6;
+                font-family: "Liberation Sans", sans-serif;
+                font-weight: 700;
+            }}
+
+            #vboard-main #headbar-button,
+            #vboard-main #combobox button.combo {{
+                background-color: {rgba((48, 48, 48), 1.0)};
+                background-image: none;
+                box-shadow: none;
+            }}
+
+            #vboard-main #grid button label {{
+                color: #FFFFFF;
+                font-family: "Liberation Sans", sans-serif;
+                font-size: 21px;
+                font-weight: 700;
+            }}
+
+            #vboard-main #grid button.compact-label label {{
+                font-size: 15px;
+            }}
+
+            #vboard-main #grid button {{
+                min-width: 10px;
+                min-height: 54px;
+                border: 2px solid {rgba((160, 160, 160), 1.0)};
+                border-radius: 10px;
+                background-color: {rgba((46, 46, 46), 1.0)};
+                background-image: none;
+                padding: 1px;
+                margin: 2px;
+                box-shadow: none;
+                transition: none;
+            }}
+
+            #vboard-main #grid button.sidebar-key {{
+                background-color: {rgba((34, 38, 44), 1.0)};
+                border: 2px solid {rgba((138, 152, 168), 1.0)};
+            }}
+
+            #vboard-main #grid button.sidebar-key.active-layer {{
+                border: 2px solid #FFFFFF;
+                background-color: {rgba((0, 118, 196), 1.0)};
+            }}
+
+            #vboard-main button {{
+                color: #FFFFFF;
+            }}
+
+            #vboard-main #grid button:hover {{
+                border: 2px solid #FFD600;
+                background-color: {rgba((74, 74, 74), 1.0)};
+                background-image: none;
+            }}
+
+            #vboard-main #grid button:active,
+            #vboard-main #grid button:active:hover {{
+                border: 2px solid #FFD600;
+                background-color: #FFD600;
+                background-image: none;
+            }}
+
+            #vboard-main #grid button:active label,
+            #vboard-main #grid button:active:hover label {{
+                color: #111111;
+            }}
+
+            #vboard-main #grid button.active-modifier {{
+                border: 2px solid #FFD600;
+                background-color: {rgba((0, 118, 196), 1.0)};
+                background-image: none;
+            }}
+
+            #vboard-main #grid button.active-command-modifier {{
+                border: 2px solid #FFFFFF;
+                color: #FFFFFF;
+                background-color: {rgba((204, 38, 38), 1.0)};
+                background-image: none;
+            }}
+
+            #vboard-main #grid button.active-command-modifier label {{
+                color: #FFFFFF;
+            }}
+
+            #vboard-main #esc-button,
+            #vboard-main #layout-button {{
+                min-width: 56px;
+                min-height: 36px;
+                border: 2px solid {rgba((185, 185, 185), 1.0)};
+                border-radius: 9px;
+                color: #FFFFFF;
+                background-color: {rgba((56, 56, 56), 1.0)};
+                background-image: none;
+                box-shadow: none;
+                transition: none;
+            }}
+
+            #vboard-main #esc-button:hover,
+            #vboard-main #layout-button:hover {{
+                border: 2px solid #FFD600;
+                background-color: {rgba((82, 82, 82), 1.0)};
+            }}
+
+            #vboard-main tooltip {{
+                color: #FFFFFF;
+                padding: 5px;
+            }}
+
+            #vboard-main #combobox button.combo {{
+                color: #FFFFFF;
+                padding: 5px;
+                border: 2px solid {rgba((150, 150, 150), 1.0)};
+                border-radius: 9px;
+                background-color: {rgba((48, 48, 48), 1.0)};
+                background-image: none;
+            }}
+
+            #vboard-main #suggestion-bar {{
+                background-color: transparent;
+            }}
+
+            #vboard-main #suggestion-button {{
+                border: 2px solid {rgba((110, 110, 110), 1.0)};
+                border-radius: 9px;
+                background-color: {rgba((36, 36, 36), 1.0)};
+                background-image: none;
+                box-shadow: none;
+                transition: none;
+                min-height: 0px;
+                padding: 2px 8px;
+            }}
+
+            #vboard-main #suggestion-button label,
+            #vboard-main #suggestion-button:disabled label {{
+                color: #FFFFFF;
+                font-family: "Liberation Sans", sans-serif;
+                font-size: {self.suggestion_font_size}px;
+                font-weight: 700;
+            }}
+
+            #vboard-main #suggestion-button.has-suggestion {{
+                border: 2px solid {rgba((185, 185, 185), 1.0)};
+            }}
+
+            #vboard-main #suggestion-button.has-suggestion:hover {{
+                border: 2px solid #FFD600;
+                background-color: {rgba((68, 68, 68), 1.0)};
             }}
             """
         elif self.style_variant == "enhanced":
@@ -1872,6 +2602,15 @@ class VirtualKeyboard(Gtk.Window):
                 {gnome_specific};
             }}
 
+            #vboard-main #grid button.sidebar-key {{
+                background-color: {rgba(header_rgb, 1.0)};
+            }}
+
+            #vboard-main #grid button.active-layer {{
+                border: 1px solid {accent};
+                background-color: {rgba(pressed_rgb, 1.0)};
+            }}
+
             #vboard-main button {{
                 background-color: transparent;
                 color: rgb({rgb_css(text_rgb)});
@@ -1906,8 +2645,9 @@ class VirtualKeyboard(Gtk.Window):
                 color: white;
             }}
 
-            #vboard-main #esc-button {{
-                min-width: 60px;
+            #vboard-main #esc-button,
+            #vboard-main #layout-button {{
+                min-width: 54px;
                 min-height: 34px;
                 border: 1px solid transparent;
                 border-radius: 6px;
@@ -1916,7 +2656,12 @@ class VirtualKeyboard(Gtk.Window):
                 background-image: none;
             }}
 
-            #vboard-main #esc-button:hover {{
+            #vboard-main #layout-button label {{
+                font-weight: 700;
+            }}
+
+            #vboard-main #esc-button:hover,
+            #vboard-main #layout-button:hover {{
                 border: 1px solid {accent};
                 background-color: {rgba(hover_rgb, 1.0)};
             }}
@@ -2009,6 +2754,10 @@ class VirtualKeyboard(Gtk.Window):
                 margin: 1px;
             }}
 
+            #vboard-main #grid button.active-layer {{
+                border: 2px solid #00CACB;
+            }}
+
             #vboard-main button {{
                 background-color: transparent;
                 color: {self.text_color};
@@ -2040,13 +2789,19 @@ class VirtualKeyboard(Gtk.Window):
                 color: white;
             }}
 
-            #vboard-main #esc-button {{
-                min-width: 60px;
+            #vboard-main #esc-button,
+            #vboard-main #layout-button {{
+                min-width: 54px;
                 border: 1px solid {self.text_color};
                 background-image: none;
             }}
 
-            #vboard-main #esc-button:hover {{
+            #vboard-main #layout-button label {{
+                font-weight: 700;
+            }}
+
+            #vboard-main #esc-button:hover,
+            #vboard-main #layout-button:hover {{
                 border: 1px solid #00CACB;
             }}
 
@@ -2105,38 +2860,122 @@ class VirtualKeyboard(Gtk.Window):
         col = 0
 
         for key_event in keys:
-            button = Gtk.Button(label=self.get_button_label(key_event))
-            button.add_events(
-                Gdk.EventMask.BUTTON_PRESS_MASK
-                | Gdk.EventMask.BUTTON_RELEASE_MASK
-                | Gdk.EventMask.POINTER_MOTION_MASK
-            )
-            button.connect("button-press-event", self.on_key_button_press_event, key_event)
-            button.connect("motion-notify-event", self.on_key_button_motion_event, key_event)
-            button.connect("button-release-event", self.on_key_button_release_event, key_event)
-            self.key_buttons[key_event] = button
-            if key_event in self.modifiers:
-                self.modifier_buttons[key_event] = button
-
             width = KEY_WIDTHS.get(key_event, 2)
-
-            grid.attach(button, col, row_index, width, 1)
+            self.attach_grid_cell(grid, key_event, col, row_index, width, 1)
             col += width
 
+    def attach_grid_cell(self, grid, key_event, col, row_index, width, height=1):
+        if key_event.startswith(SPACER_KEY_PREFIX):
+            spacer = Gtk.Box()
+            spacer.set_sensitive(False)
+            grid.attach(spacer, col, row_index, width, height)
+            return
+
+        label_text = self.get_button_label(key_event)
+        button = Gtk.Button(label=label_text)
+        button.set_can_focus(False)
+        button.set_focus_on_click(False)
+        if width <= 2 and len(label_text) >= 4:
+            button.get_style_context().add_class("compact-label")
+        button.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
+            | Gdk.EventMask.LEAVE_NOTIFY_MASK
+        )
+        button.connect("button-press-event", self.on_key_button_press_event, key_event)
+        button.connect("motion-notify-event", self.on_key_button_motion_event, key_event)
+        button.connect("button-release-event", self.on_key_button_release_event, key_event)
+        button.connect("leave-notify-event", self.on_key_button_leave_notify_event)
+
+        if key_event in TV_ACTION_KEYS:
+            button.get_style_context().add_class("sidebar-key")
+            tooltips = {
+                TV_ACTION_HIDE: "Hide keyboard",
+                TV_ACTION_LANG: "Switch keyboard layout (right-click to choose)",
+                TV_ACTION_LAYER_ALPHA: "Letters layer",
+                TV_ACTION_LAYER_NUMBERS: "Numbers, function keys, and navigation layer",
+                TV_ACTION_OPTIONS: "Open Vboard options",
+            }
+            if key_event in tooltips:
+                button.set_tooltip_text(tooltips[key_event])
+
+        self.key_buttons[key_event] = button
+        if key_event in self.modifiers:
+            self.modifier_buttons[key_event] = button
+
+        grid.attach(button, col, row_index, width, height)
+
     def get_button_label(self, key_event):
-        if key_event == "CapsLock":
-            return "Caps"
+        if key_event == TV_ACTION_HIDE:
+            return "Hide"
+        if key_event == TV_ACTION_LANG:
+            return self.get_current_layout_short_label()
+        if key_event == TV_ACTION_LAYER_ALPHA:
+            return "ABC"
+        if key_event == TV_ACTION_LAYER_NUMBERS:
+            return "123"
+        if key_event == TV_ACTION_OPTIONS:
+            return "⚙"
+
+        special_labels = {
+            "CapsLock": "Caps",
+            "Delete": "Del",
+            "Insert": "Ins",
+            "Home": "Home",
+            "End": "End",
+            "PageUp": "PgUp",
+            "PageDown": "PgDn",
+            "Print": "PrtSc",
+            "ScrollLock": "ScrLk",
+            "Pause": "Pause",
+            "NumLock": "Num",
+            "KP_Divide": "/",
+            "KP_Multiply": "*",
+            "KP_Subtract": "-",
+            "KP_Add": "+",
+            "KP_Enter": "↵",
+            "KP_Decimal": ".",
+            **{f"KP_{digit}": str(digit) for digit in range(10)},
+        }
+        if key_event == "Backspace" and self.keyboard_mode == KEYBOARD_MODE_COMPACT_TV:
+            return "⌫"
+        if key_event in special_labels:
+            return special_labels[key_event]
+
+        if key_event == "Alt_R" and (
+            self.keyboard_mode == KEYBOARD_MODE_COMPACT_TV
+            or bool(self.get_active_altgr_map())
+        ):
+            return "AltGr"
 
         if key_event in MODIFIER_KEYS:
             return key_event[:-2]
 
         key_labels = self.get_active_key_labels()
         shifted_map = self.get_active_shifted_map()
+        altgr_map = self.get_active_altgr_map()
+        altgr_shifted_map = self.get_active_altgr_shifted_map()
         shift_active = self.modifiers["Shift_L"] or self.modifiers["Shift_R"]
+        altgr_active = self.modifiers.get("Alt_R", False)
+        uppercase_active = shift_active != self.caps_lock_active
+
+        if altgr_active:
+            if uppercase_active and key_event in altgr_shifted_map:
+                return altgr_shifted_map[key_event]
+            if key_event in altgr_map:
+                altgr_label = altgr_map[key_event]
+                if len(altgr_label) == 1 and altgr_label.isalpha():
+                    return (
+                        altgr_label.upper()
+                        if uppercase_active
+                        else altgr_label.lower()
+                    )
+                return altgr_label
+
         key_label = key_labels.get(key_event, key_event)
 
         if len(key_label) == 1 and key_label.isalpha():
-            uppercase_active = shift_active != self.caps_lock_active
             return key_label.upper() if uppercase_active else key_label.lower()
 
         if shift_active and key_event in shifted_map:
@@ -2150,7 +2989,9 @@ class VirtualKeyboard(Gtk.Window):
 
     def update_modifier(self, key_event, value):
         self.modifiers[key_event] = value
-        button = self.modifier_buttons[key_event]
+        button = self.modifier_buttons.get(key_event)
+        if button is None:
+            return
         style_context = button.get_style_context()
         modifier_class = (
             "active-command-modifier"
@@ -2188,12 +3029,43 @@ class VirtualKeyboard(Gtk.Window):
         self.current_word = ""
         self.update_suggestions()
 
+    def handle_tv_action_key(self, widget, event, key_event):
+        if key_event == TV_ACTION_HIDE:
+            if self.tray_icon is not None:
+                self.toggle_visibility()
+            else:
+                self.iconify()
+            return True
+        if key_event == TV_ACTION_LANG:
+            if event.button == 3:
+                self.popup_layout_menu(widget, event)
+            else:
+                self.cycle_keyboard_layout()
+            return True
+        if key_event == TV_ACTION_LAYER_ALPHA:
+            self.set_compact_tv_layer(COMPACT_TV_LAYER_ALPHA)
+            return True
+        if key_event == TV_ACTION_LAYER_NUMBERS:
+            self.set_compact_tv_layer(COMPACT_TV_LAYER_NUMBERS)
+            return True
+        if key_event == TV_ACTION_OPTIONS:
+            self.open_settings_dialog()
+            return True
+        return False
+
     def on_key_button_press_event(self, widget, event, key_event):
         if event.type in (Gdk.EventType._2BUTTON_PRESS, Gdk.EventType._3BUTTON_PRESS):
             return True
 
         self.stop_key_repeat()
+        self.clear_key_button_visual_states(except_button=widget)
         self.clear_suggestion_override(update=False)
+
+        if key_event in TV_ACTION_KEYS:
+            if event.button in (1, 3):
+                self.handle_tv_action_key(widget, event, key_event)
+                return True
+            return False
 
         if event.button == 3:
             if key_event not in self.modifiers:
@@ -2235,6 +3107,7 @@ class VirtualKeyboard(Gtk.Window):
         return False
 
     def on_key_button_release_event(self, widget, event, key_event):
+        self.schedule_key_button_visual_reset()
         if event.button != 1:
             return False
 
@@ -2246,6 +3119,35 @@ class VirtualKeyboard(Gtk.Window):
             return False
 
         self.stop_key_repeat()
+        return False
+
+    def on_key_button_leave_notify_event(self, widget, event):
+        widget.unset_state_flags(Gtk.StateFlags.ACTIVE | Gtk.StateFlags.PRELIGHT)
+        return False
+
+    def on_window_button_release_event(self, widget, event):
+        self.stop_key_repeat()
+        self.schedule_key_button_visual_reset()
+        return False
+
+    def on_window_leave_notify_event(self, widget, event):
+        self.stop_key_repeat()
+        self.schedule_key_button_visual_reset()
+        return False
+
+    def schedule_key_button_visual_reset(self):
+        GLib.idle_add(self.clear_key_button_visual_states)
+
+    def clear_key_button_visual_states(self, except_button=None):
+        stale_flags = (
+            Gtk.StateFlags.ACTIVE
+            | Gtk.StateFlags.PRELIGHT
+            | Gtk.StateFlags.FOCUSED
+        )
+        for button in self.key_buttons.values():
+            if button is except_button:
+                continue
+            button.unset_state_flags(stale_flags)
         return False
 
     def stop_key_repeat(self):
@@ -2303,6 +3205,20 @@ class VirtualKeyboard(Gtk.Window):
         if update:
             self.update_suggestions()
 
+    def is_altgr_character_key(self, key_event, modifiers=None):
+        active_modifiers = self.modifiers if modifiers is None else modifiers
+        if not active_modifiers.get("Alt_R", False):
+            return False
+        other_command_mods = (
+            mod for mod in COMMAND_MODIFIER_KEYS if mod != "Alt_R"
+        )
+        if any(active_modifiers.get(mod, False) for mod in other_command_mods):
+            return False
+        return (
+            key_event in self.get_active_altgr_map()
+            or key_event in self.get_active_altgr_shifted_map()
+        )
+
     def track_current_word(self, key_event, modifiers=None):
         active_modifiers = self.modifiers if modifiers is None else modifiers
         self.clear_suggestion_override(update=False)
@@ -2311,7 +3227,9 @@ class VirtualKeyboard(Gtk.Window):
             self.current_word = ""
             return
 
-        if self.has_active_command_modifier(active_modifiers):
+        if self.has_active_command_modifier(
+            active_modifiers
+        ) and not self.is_altgr_character_key(key_event, active_modifiers):
             self.current_word = ""
             self.update_suggestions()
             return
@@ -2321,13 +3239,32 @@ class VirtualKeyboard(Gtk.Window):
             self.update_suggestions()
             return
 
-        if key_event in {"Space", "Tab", "Enter", "Esc", "CapsLock", "←", "→", "↑", "↓"}:
+        if key_event in {
+            "Space",
+            "Tab",
+            "Enter",
+            "Esc",
+            "CapsLock",
+            "Delete",
+            "Insert",
+            "Home",
+            "End",
+            "PageUp",
+            "PageDown",
+            "←",
+            "→",
+            "↑",
+            "↓",
+        }:
             self.current_word = ""
             self.update_suggestions()
             return
 
         typed_char = self.key_event_to_character(key_event, active_modifiers)
-        if typed_char and all(char.isalpha() or char in {"'", "-"} for char in typed_char):
+        if typed_char and all(
+            char.isalpha() or char in SUPPORTED_WORD_CONNECTORS
+            for char in typed_char
+        ):
             self.current_word += typed_char
         else:
             self.current_word = ""
@@ -2341,12 +3278,30 @@ class VirtualKeyboard(Gtk.Window):
     def key_event_to_character(self, key_event, modifiers=None):
         active_modifiers = self.modifiers if modifiers is None else modifiers
         shift_active = active_modifiers["Shift_L"] or active_modifiers["Shift_R"]
+        altgr_active = active_modifiers.get("Alt_R", False)
+        uppercase_active = shift_active != self.caps_lock_active
         key_labels = self.get_active_key_labels()
         shifted_map = self.get_active_shifted_map()
+        altgr_map = self.get_active_altgr_map()
+        altgr_shifted_map = self.get_active_altgr_shifted_map()
+
+        if altgr_active:
+            if uppercase_active and key_event in altgr_shifted_map:
+                return altgr_shifted_map[key_event]
+            if key_event in altgr_map:
+                altgr_label = altgr_map[key_event]
+                if len(altgr_label) == 1 and altgr_label.isalpha():
+                    return (
+                        altgr_label.upper()
+                        if uppercase_active
+                        else altgr_label.lower()
+                    )
+                if len(altgr_label) == 1:
+                    return altgr_label
+
         key_label = key_labels.get(key_event, key_event)
 
         if len(key_label) == 1 and key_label.isalpha():
-            uppercase_active = shift_active != self.caps_lock_active
             return key_label.upper() if uppercase_active else key_label.lower()
 
         if shift_active and key_event in shifted_map:
@@ -2431,13 +3386,19 @@ class VirtualKeyboard(Gtk.Window):
         if char == " ":
             return "Space", modifiers
 
-        key_event_with_shift = self.layout_character_lookup.get(char)
-        if key_event_with_shift is not None:
-            key_event, needs_shift = key_event_with_shift
+        entry = self.layout_character_lookup.get(char)
+        if entry is not None:
+            if len(entry) == 3:
+                key_event, needs_shift, needs_altgr = entry
+            else:
+                key_event, needs_shift = entry
+                needs_altgr = False
             if self.caps_lock_active and char.isalpha():
                 needs_shift = not needs_shift
             if needs_shift:
                 modifiers["Shift_L"] = True
+            if needs_altgr:
+                modifiers["Alt_R"] = True
             return key_event, modifiers
 
         return None, modifiers
@@ -2475,6 +3436,18 @@ class VirtualKeyboard(Gtk.Window):
                     "start_minimized",
                     fallback=False,
                 )
+                self.sync_system_layout = self.config.getboolean(
+                    "DEFAULT",
+                    "sync_system_layout",
+                    fallback=True,
+                )
+                self.keyboard_mode = self.normalize_keyboard_mode(
+                    self.config.get(
+                        "DEFAULT",
+                        "keyboard_mode",
+                        fallback=KEYBOARD_MODE_STANDARD,
+                    )
+                )
                 self.keyboard_layout = self.normalize_keyboard_layout(
                     self.config.get(
                         "DEFAULT",
@@ -2499,6 +3472,11 @@ class VirtualKeyboard(Gtk.Window):
             print(f"Warning: Could not read config file ({exc}). Using default values.")
 
     def save_settings(self):
+        saved_layout = (
+            self.keyboard_layout
+            if not self.keyboard_layouts.get(self.keyboard_layout, {}).get("dynamic")
+            else DEFAULT_KEYBOARD_LAYOUT
+        )
         self.config["DEFAULT"] = {
             "bg_color": self.bg_color,
             "opacity": self.opacity,
@@ -2506,11 +3484,13 @@ class VirtualKeyboard(Gtk.Window):
             "style_variant": self.style_variant,
             "text_prediction_enabled": str(self.text_prediction_enabled),
             "start_minimized": str(self.start_minimized),
+            "sync_system_layout": str(self.sync_system_layout),
+            "keyboard_mode": self.keyboard_mode,
             "gesture_enabled": str(self.gesture_enabled),
             "gesture_visual_feedback_enabled": str(
                 self.gesture_visual_feedback_enabled
             ),
-            "keyboard_layout": self.keyboard_layout,
+            "keyboard_layout": saved_layout,
             "width": self.width,
             "height": self.height,
             "pos_x": str(self.pos_x),

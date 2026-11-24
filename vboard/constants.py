@@ -13,7 +13,71 @@ MODIFIER_KEYS = (
     "Super_R",
 )
 
+FUNCTION_KEYS = tuple(f"F{number}" for number in range(1, 13))
+
+NAVIGATION_KEYS = (
+    "Delete",
+    "Insert",
+    "Home",
+    "End",
+    "PageUp",
+    "PageDown",
+)
+
+SYSTEM_KEYS = (
+    "Print",
+    "ScrollLock",
+    "Pause",
+)
+
+NUMPAD_KEYS = (
+    "NumLock",
+    "KP_Divide",
+    "KP_Multiply",
+    "KP_Subtract",
+    "KP_Add",
+    "KP_Enter",
+    "KP_Decimal",
+    "KP_0",
+    "KP_1",
+    "KP_2",
+    "KP_3",
+    "KP_4",
+    "KP_5",
+    "KP_6",
+    "KP_7",
+    "KP_8",
+    "KP_9",
+)
+
 DEFAULT_KEYBOARD_LAYOUT = "en"
+
+KEYBOARD_MODE_STANDARD = "standard"
+KEYBOARD_MODE_COMPACT_TV = "compact_tv"
+KEYBOARD_MODE_CHOICES = (
+    (KEYBOARD_MODE_STANDARD, "Standard"),
+    (KEYBOARD_MODE_COMPACT_TV, "Compact for TV"),
+)
+
+COMPACT_TV_LAYER_ALPHA = "alpha"
+COMPACT_TV_LAYER_NUMBERS = "numbers"
+
+TV_ACTION_HIDE = "__tv_hide__"
+TV_ACTION_LANG = "__tv_lang__"
+TV_ACTION_LAYER_ALPHA = "__tv_layer_alpha__"
+TV_ACTION_LAYER_NUMBERS = "__tv_layer_numbers__"
+TV_ACTION_OPTIONS = "__tv_options__"
+TV_ACTION_KEYS = frozenset(
+    {
+        TV_ACTION_HIDE,
+        TV_ACTION_LANG,
+        TV_ACTION_LAYER_ALPHA,
+        TV_ACTION_LAYER_NUMBERS,
+        TV_ACTION_OPTIONS,
+    }
+)
+
+SPACER_KEY_PREFIX = "Spacer:"
 
 COMMAND_MODIFIER_KEYS = (
     "Ctrl_L",
@@ -25,6 +89,7 @@ COMMAND_MODIFIER_KEYS = (
 )
 
 ONBOARD_BACKGROUND_PRESET = "__onboard__"
+HIGH_CONTRAST_TV_BACKGROUND_PRESET = "__high_contrast_tv__"
 ENHANCED_BACKGROUND_PRESET = "__enhanced__"
 
 COLOR_PRESETS = [
@@ -56,6 +121,7 @@ COLOR_PRESETS = [
 
 COLOR_CHOICES = [
     ("Onboard Droid Theme", ONBOARD_BACKGROUND_PRESET),
+    ("High Contrast TV", HIGH_CONTRAST_TV_BACKGROUND_PRESET),
     *[
         (f"Enhanced {label}", (ENHANCED_BACKGROUND_PRESET, color))
         for label, color in COLOR_PRESETS
@@ -85,4 +151,5 @@ KEY_WIDTHS = {
 }
 
 SUPPORTED_WORD_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'-")
+SUPPORTED_WORD_CONNECTORS = {"'", "\u2019", "\u02bc", "-"}
 SUGGESTION_LIMIT = 5

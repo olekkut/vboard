@@ -175,11 +175,13 @@ When launched, vboard presents a compact keyboard with a minimal interface. The 
 - Experimental swipe typing on alphabetic keys: drag across the intended letters and release to insert the best matching dictionary word
 
 ### Interface Controls
-- ☰ (menu) - Toggle visibility of other interface controls
-- **Options** - Open in-app options for typing, startup, layout, about, bug reports, and quit actions
+- **ESC** - Send Escape
+- **Layout button (`EN`/`UA`/`PL`/`RU`/…)** - Left-click to cycle through configured system keyboard layouts (updating both the system layout and vboard); right-click to pick any layout directly
+- ☰ (menu) - Toggle visibility of background and opacity controls
+- **Options** - Open in-app options for typing, startup, system layout sync, keyboard layout, keyboard style (`Standard` / `Compact for TV`), about, bug reports, and quit actions
 - `+ -` Increase opacity
 - `- -` Decrease opacity
-- **Background dropdown** - Change the keyboard background color or pick an enhanced color theme
+- **Background dropdown** - Switch between `Onboard Droid Theme`, `High Contrast TV`, enhanced color themes, and classic backgrounds
 - **Right-click a key** - Send Shift + that key once
 - **Tray icon click** - Hide or show vboard
 - **Tray icon right-click** - Open tray controls when the tray backend supports a separate context menu
@@ -187,10 +189,12 @@ When launched, vboard presents a compact keyboard with a minimal interface. The 
 ## Configuration
 vboard saves its settings to `~/.config/vboard/settings.conf`. This configuration file stores:
 - Background color
-- Theme style
+- Theme style (`onboard`, `high_contrast_tv`, `enhanced`, or `classic`)
 - Text prediction enabled/disabled state
 - Gesture typing enabled/disabled state
 - Start minimized enabled/disabled state
+- System keyboard layout synchronization enabled/disabled state
+- Keyboard style (`standard` or `compact_tv`)
 - Keyboard layout
 - Opacity level
 - Text color
@@ -210,7 +214,7 @@ User layouts can be added or overridden in:
 ~/.config/vboard/layouts/
 ```
 
-Each layout file defines an `id`, display `label`, `rows`, optional key `labels`, and optional `shifted` output. To customize a packaged layout, copy its JSON file into `~/.config/vboard/layouts/`, edit it, and restart vboard.
+Each layout file defines an `id`, display `label`, `rows`, optional `short_label`, `xkb_layout`, `xkb_variant`, key `labels`, `shifted`, `altgr`, and `altgr_shifted` mappings. To customize a packaged layout, copy its JSON file into `~/.config/vboard/layouts/`, edit it, and restart vboard.
 
 ## Troubleshooting
 
@@ -291,6 +295,3 @@ This project is licensed under GPLv3.
 
 ## License
 vboard is licensed under the GNU General Public License v3. See `LICENSE` for details.
-
-## Note
-Currently only the QWERTY US layout is supported.
