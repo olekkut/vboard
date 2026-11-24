@@ -11,6 +11,22 @@ It supports many themes, as you can see below:
 
 <img src="screenshots/stitched.gif" width="600">
 
+### Compact for TV, High Contrast TV & Fast Language Switching (`EN` / `PL` / `UA` / `RU`)
+
+**Compact for TV (Onboard Droid Theme — Russian `RU`, one-click top-bar switcher & sidebar):**
+
+<img src="screenshots/compact_tv_droid_ru.png" width="700">
+
+**Compact for TV (High Contrast TV — Ukrainian `UA` & `123` layer):**
+
+<img src="screenshots/compact_tv_high_contrast_uk.png" width="700">
+
+<img src="screenshots/compact_tv_high_contrast_123.png" width="700">
+
+**Standard layout (Polish `PL` with `AltGr` diacritics & top-bar `EN`/`PL`/`UA`/`RU` switcher):**
+
+<img src="screenshots/standard_droid_pl_altgr.png" width="700">
+
 ## Overview
 vboard is a lightweight, customizable virtual keyboard designed for Linux desktop systems. It runs as a Wayland-compatible on-screen keyboard on KDE Plasma, and also works on GNOME by falling back to Xwayland. It provides a full on-screen keyboard with modifier keys such as Ctrl, Alt, and Super (Meta/Win), which makes it especially useful for:
 
@@ -176,7 +192,7 @@ When launched, vboard presents a compact keyboard with a minimal interface. The 
 
 ### Interface Controls
 - **ESC** - Send Escape
-- **Layout button (`EN`/`UA`/`PL`/`RU`/…)** - Left-click to cycle through configured system keyboard layouts (updating both the system layout and vboard); right-click to pick any layout directly
+- **Top-bar layout buttons (`EN` / `PL` / `UA` / `RU` / …)** - One-click switch between configured system keyboard layouts and quick-switch languages (updating both the OS layout and vboard); right-click any layout button to pick from all layouts; in **Compact for TV** mode, the sidebar language button under `Hide` cycles through the same layout list
 - ☰ (menu) - Toggle visibility of background and opacity controls
 - **Options** - Open in-app options for typing, startup, system layout sync, keyboard layout, keyboard style (`Standard` / `Compact for TV`), about, bug reports, and quit actions
 - `+ -` Increase opacity
