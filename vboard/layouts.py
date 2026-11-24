@@ -15,6 +15,7 @@ SYSTEM_LAYOUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "la
 USER_LAYOUT_DIR = os.path.expanduser("~/.config/vboard/layouts")
 REQUIRED_LAYOUT_FIELDS = ("id", "label", "rows")
 LAYOUT_SHORT_LABELS = {
+    "ar": "AR",
     "de": "DE",
     "en": "EN",
     "fr": "FR",

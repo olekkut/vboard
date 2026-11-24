@@ -13,6 +13,7 @@ PLASMA_LAYOUT_INTERFACE = "org.kde.KeyboardLayouts"
 GNOME_INPUT_SOURCES_SCHEMA = "org.gnome.desktop.input-sources"
 
 DEFAULT_VBOARD_TO_XKB_LAYOUT = {
+    "ar": "ar",
     "de": "de",
     "en": "us",
     "fr": "fr",
@@ -23,6 +24,7 @@ DEFAULT_VBOARD_TO_XKB_LAYOUT = {
 }
 
 XKB_FALLBACK_TO_VBOARD_LAYOUT = {
+    "ar": "ar",
     "au": "en",
     "ca": "en",
     "de": "de",
@@ -37,6 +39,7 @@ XKB_FALLBACK_TO_VBOARD_LAYOUT = {
 
 # Default XKB variant names that are identical to the empty ("") variant in xkb-data.
 DEFAULT_XKB_VARIANT_ALIASES = {
+    ("ar", "basic"): "",
     ("de", "basic"): "",
     ("fr", "basic"): "",
     ("pl", "basic"): "",

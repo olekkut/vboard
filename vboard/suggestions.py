@@ -5,6 +5,7 @@ from .constants import SUGGESTION_LIMIT, SUPPORTED_WORD_CONNECTORS
 
 
 LAYOUT_DICTIONARIES = {
+    "ar": ("ar", "ar_SA", "ar_EG"),
     "de": ("de_DE", "de"),
     "en": ("en_US", "en_GB", "en"),
     "fr": ("fr_FR", "fr"),
@@ -50,6 +51,7 @@ class HunspellSuggestionEngine:
             "ISO8859-1": "iso-8859-1",
             "ISO8859-2": "iso-8859-2",
             "ISO8859-5": "iso-8859-5",
+            "ISO8859-6": "iso-8859-6",
             "ISO8859-15": "iso-8859-15",
             "KOI8-R": "koi8-r",
             "KOI8-U": "koi8-u",
@@ -58,6 +60,9 @@ class HunspellSuggestionEngine:
             "WINDOWS-1251": "cp1251",
             "MICROSOFT-CP1252": "cp1252",
             "CP1252": "cp1252",
+            "MICROSOFT-CP1256": "cp1256",
+            "CP1256": "cp1256",
+            "WINDOWS-1256": "cp1256",
         }
         try:
             with open(aff_path, "r", encoding="ascii", errors="ignore") as aff_handle:

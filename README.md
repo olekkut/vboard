@@ -11,7 +11,25 @@ It supports many themes, as you can see below:
 
 <img src="screenshots/stitched.gif" width="600">
 
-### Compact for TV, High Contrast TV & Fast Language Switching (`EN` / `PL` / `UA` / `RU`)
+### Apple macOS Look & Accessibility Customization (v2.8.0)
+
+**Apple macOS Light — Polish `PL` with Apple Orange `AltGr` accent hints, System/Media row & Current Text preview bar:**
+
+<img src="screenshots/apple_light_pl_altgr_toolbars.png" width="700">
+
+**Apple macOS Dark — Standard layout with System/Media row & `EN` / `PL` / `UA` / `RU` / `AR` fast switcher:**
+
+<img src="screenshots/apple_dark_standard_media.png" width="700">
+
+**Apple macOS Dark — Compact for TV with Arabic (`AR`) layout:**
+
+<img src="screenshots/apple_dark_compact_tv_ar.png" width="700">
+
+**4-Tab Customize Vboard Dialog (Appearance, Toolbars & Layout, Typing & Accessibility, Fade & Window):**
+
+<img src="screenshots/customize_dialog_appearance.png" width="520">
+
+### Compact for TV, High Contrast TV & Fast Language Switching (`EN` / `PL` / `UA` / `RU` / `AR`)
 
 **Compact for TV (Onboard Droid Theme — Russian `RU`, one-click top-bar switcher & sidebar):**
 

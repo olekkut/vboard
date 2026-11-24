@@ -366,6 +366,104 @@ class VirtualKeyboardIntegrationTest(unittest.TestCase):
             with open(rules_path, encoding="utf-8") as handle:
                 self.assertIn("position=120,340", handle.read())
 
+    def test_apple_themes_responsive_scaling_and_altgr_orange_hints(self):
+        # Verify both Apple macOS themes load valid GTK3 CSS without errors
+        for theme_label, expected_variant in (
+            ("Apple macOS Dark", "apple_dark"),
+            ("Apple macOS Light", "apple_light"),
+        ):
+            self.window.set_theme_by_label(theme_label, save=False)
+            self.assertEqual(self.window.style_variant, expected_variant)
+            self.assertEqual(self.window.get_active_theme_label(), theme_label)
+
+        # Verify responsive font scaling reacts to font_scale & window sizing
+        self.window.set_font_scale(0.80, save=False)
+        small_font = self.window.key_font_size
+        self.window.set_font_scale(1.50, save=False)
+        large_font = self.window.key_font_size
+        self.assertGreater(large_font, small_font)
+
+        # Verify AltGr orange accent hints light up Polish diacritic keys
+        self.window.set_keyboard_layout("pl", sync_system=False, save=False)
+        self.window.update_modifier("Alt_R", True)
+        self.assertTrue(
+            self.window.key_buttons["A"].get_style_context().has_class("altgr-hint")
+        )
+        self.assertFalse(
+            self.window.key_buttons["F"].get_style_context().has_class("altgr-hint")
+        )
+        self.window.update_modifier("Alt_R", False)
+        self.assertFalse(
+            self.window.key_buttons["A"].get_style_context().has_class("altgr-hint")
+        )
+
+    def test_sticky_modifier_lock_autocap_toolbars_dwell_fade_and_customize_dialog(self):
+        from vboard.constants import INPUT_TRIGGER_RELEASE
+
+        # Sticky double-tap modifier lock stays active after emit_key
+        self.window.set_sticky_modifier_lock(True, save=False)
+        self.window.toggle_modifier_key("Shift_L")  # 1st tap: one-shot
+        self.assertTrue(self.window.modifiers["Shift_L"])
+        self.assertFalse(self.window.locked_modifiers["Shift_L"])
+        self.window.toggle_modifier_key("Shift_L")  # 2nd tap: locked
+        self.assertTrue(self.window.locked_modifiers["Shift_L"])
+        self.window.emit_key("A")
+        self.assertTrue(self.window.modifiers["Shift_L"])  # remains locked!
+        self.window.toggle_modifier_key("Shift_L")  # 3rd tap: unlock & off
+        self.assertFalse(self.window.modifiers["Shift_L"])
+
+        # Auto-capitalize after sentence + Current Text bar + Media row
+        self.window.set_keyboard_layout("en", sync_system=False, save=False)
+        self.window.set_show_current_text_bar(True, save=False)
+        self.window.set_show_media_row(True, save=False)
+        self.window.set_auto_capitalize(True, save=False)
+        self.window.clear_current_text_buffer()
+        self.window.emit_key("H")
+        self.window.emit_key("I")
+        self.window.emit_key(".")
+        self.window.emit_key("Space")
+        self.assertTrue(self.window.modifiers["Shift_L"])
+        self.assertEqual(self.window.current_text_buffer, "hi. ")
+        self.assertTrue(self.window.media_bar.get_visible())
+        self.assertTrue(self.window.current_text_bar.get_visible())
+
+        # Input trigger mode on release + inactivity fade + dwell trigger
+        self.window.set_input_trigger_mode(INPUT_TRIGGER_RELEASE, save=False)
+        self.window.set_fade_on_inactivity(True, save=False)
+        self.window.set_inactivity_fade_opacity(0.30, save=False)
+        self.window.set_faded_state(True)
+        self.assertTrue(self.window._is_faded)
+        self.window.reset_inactivity_timer()
+        self.assertFalse(self.window._is_faded)
+
+        emitted = []
+        self.window.backend.emit_key = lambda key, mods: emitted.append(key)
+        self.window.set_dwell_enabled(True, save=False)
+        btn_a = self.window.key_buttons["A"]
+        self.window.start_dwell_timer(btn_a, "A")
+        self.window._on_dwell_timeout(btn_a, "A")
+        self.assertIn("A", emitted)
+
+        # Open & close 4-tab Customize Vboard dialog + settings round-trip
+        self.window.set_key_corner_radius(12, save=False)
+        self.window.set_key_spacing(5, save=False)
+        self.window.set_accent_color("#FF9F0A", save=False)
+        self.window.open_settings_dialog()
+        self.assertIsNotNone(self.window.settings_dialog)
+        self.window.settings_dialog.destroy()
+        self.assertIsNone(self.window.settings_dialog)
+
+        self.window.save_settings()
+        self.window.key_corner_radius = 1
+        self.window.accent_color = "#000000"
+        self.window.read_settings()
+        self.assertEqual(self.window.key_corner_radius, 12)
+        self.assertEqual(self.window.key_spacing, 5)
+        self.assertEqual(self.window.accent_color, "#FF9F0A")
+        self.assertEqual(self.window.input_trigger_mode, INPUT_TRIGGER_RELEASE)
+        self.assertTrue(self.window.show_media_row)
+        self.assertTrue(self.window.show_current_text_bar)
+
 
 if __name__ == "__main__":
     unittest.main()

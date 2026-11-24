@@ -1,6 +1,6 @@
 APP_DISPLAY_NAME = "Vboard"
 APP_ID = "io.github.archisman-panigrahi.vboard"
-VERSION = "2.7.4"
+VERSION = "2.8.0"
 
 MODIFIER_KEYS = (
     "Shift_L",
@@ -30,6 +30,17 @@ SYSTEM_KEYS = (
     "Pause",
 )
 
+MEDIA_KEYS = (
+    "VolumeMute",
+    "VolumeDown",
+    "VolumeUp",
+    "PreviousSong",
+    "PlayPause",
+    "NextSong",
+    "BrightnessDown",
+    "BrightnessUp",
+)
+
 NUMPAD_KEYS = (
     "NumLock",
     "KP_Divide",
@@ -49,6 +60,8 @@ NUMPAD_KEYS = (
     "KP_8",
     "KP_9",
 )
+
+MAX_KEY_HOLD_SECONDS = 5.0
 
 DEFAULT_KEYBOARD_LAYOUT = "en"
 QUICK_SWITCH_LAYOUTS = ("en", "pl", "uk", "ru")
@@ -89,9 +102,36 @@ COMMAND_MODIFIER_KEYS = (
     "Super_R",
 )
 
+APPLE_DARK_BACKGROUND_PRESET = "__apple_dark__"
+APPLE_LIGHT_BACKGROUND_PRESET = "__apple_light__"
 ONBOARD_BACKGROUND_PRESET = "__onboard__"
 HIGH_CONTRAST_TV_BACKGROUND_PRESET = "__high_contrast_tv__"
 ENHANCED_BACKGROUND_PRESET = "__enhanced__"
+
+ACCENT_COLOR_CHOICES = (
+    ("Apple Blue", "#0A84FF"),
+    ("Apple Light Blue", "#007AFF"),
+    ("Apple Orange", "#FF9F0A"),
+    ("Apple Green", "#30D158"),
+    ("Apple Purple", "#BF5AF2"),
+    ("Apple Pink", "#FF375F"),
+    ("Teal", "#00CACB"),
+)
+
+DEFAULT_ACCENT_COLOR = "#0A84FF"
+DEFAULT_FONT_SCALE = 1.0
+DEFAULT_KEY_RADIUS = 8
+DEFAULT_KEY_SPACING = 3
+DEFAULT_INACTIVITY_DELAY_SECONDS = 10
+DEFAULT_INACTIVITY_FADE_OPACITY = 0.25
+DEFAULT_DWELL_TIME_MS = 800
+
+INPUT_TRIGGER_PRESS = "press"
+INPUT_TRIGGER_RELEASE = "release"
+INPUT_TRIGGER_CHOICES = (
+    (INPUT_TRIGGER_PRESS, "On Press (Mouse Down)"),
+    (INPUT_TRIGGER_RELEASE, "On Release (Mouse Up)"),
+)
 
 COLOR_PRESETS = [
     ("Black", "0,0,0"),
@@ -121,6 +161,8 @@ COLOR_PRESETS = [
 ]
 
 COLOR_CHOICES = [
+    ("Apple macOS Dark", APPLE_DARK_BACKGROUND_PRESET),
+    ("Apple macOS Light", APPLE_LIGHT_BACKGROUND_PRESET),
     ("Onboard Droid Theme", ONBOARD_BACKGROUND_PRESET),
     ("High Contrast TV", HIGH_CONTRAST_TV_BACKGROUND_PRESET),
     *[

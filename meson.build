@@ -38,6 +38,7 @@ install_data(
     'vboard/layouts.py',
     'vboard/suggestions.py',
     'vboard/system_layouts.py',
+    'vboard/themes.py',
     'vboard/window.py',
     'vboard/xkb_layouts.py',
   ),

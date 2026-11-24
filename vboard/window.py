@@ -4,19 +4,33 @@ import os
 import sys
 
 from .constants import (
+    ACCENT_COLOR_CHOICES,
     APP_DISPLAY_NAME,
+    APPLE_DARK_BACKGROUND_PRESET,
+    APPLE_LIGHT_BACKGROUND_PRESET,
     COMMAND_MODIFIER_KEYS,
     COLOR_CHOICES,
     COMPACT_TV_LAYER_ALPHA,
     COMPACT_TV_LAYER_NUMBERS,
+    DEFAULT_ACCENT_COLOR,
+    DEFAULT_DWELL_TIME_MS,
+    DEFAULT_FONT_SCALE,
+    DEFAULT_INACTIVITY_DELAY_SECONDS,
+    DEFAULT_INACTIVITY_FADE_OPACITY,
+    DEFAULT_KEY_RADIUS,
+    DEFAULT_KEY_SPACING,
     DEFAULT_KEYBOARD_LAYOUT,
     ENHANCED_BACKGROUND_PRESET,
     HIGH_CONTRAST_TV_BACKGROUND_PRESET,
+    INPUT_TRIGGER_CHOICES,
+    INPUT_TRIGGER_PRESS,
+    INPUT_TRIGGER_RELEASE,
     KEY_WIDTHS,
     KEYBOARD_MODE_CHOICES,
     KEYBOARD_MODE_COMPACT_TV,
     KEYBOARD_MODE_STANDARD,
     LIGHT_BACKGROUND_COLORS,
+    MAX_KEY_HOLD_SECONDS,
     MODIFIER_KEYS,
     ONBOARD_BACKGROUND_PRESET,
     QUICK_SWITCH_LAYOUTS,
@@ -41,7 +55,7 @@ from .gtk import (
     GLib,
     Gtk,
 )
-from .input_backends import NullInputBackend, UInputBackend
+from .input_backends import EvdevUInputBackend, NullInputBackend, UInputBackend
 from .layouts import (
     build_compact_tv_alpha_cells,
     build_compact_tv_numbers_cells,
@@ -56,6 +70,7 @@ from .system_layouts import (
     get_next_layout_id,
     resolve_system_entry_to_vboard_layout,
 )
+from .themes import build_theme_css
 
 
 BUG_REPORT_URL = "https://github.com/archisman-panigrahi/vboard/issues/"
@@ -590,7 +605,10 @@ class StatusNotifierTrayIcon:
 
 
 class VirtualKeyboard(Gtk.Window):
+    BASE_GRID_WIDTH = 920
     BASE_KEY_HEIGHT = 52
+    BASE_KEY_FONT_SIZE = 16
+    BASE_HEADER_FONT_SIZE = 13
     BASE_SUGGESTION_HEIGHT = 34
     BASE_SUGGESTION_FONT_SIZE = 15
     BASE_SUGGESTION_SPACING = 4
@@ -620,12 +638,22 @@ class VirtualKeyboard(Gtk.Window):
         self.connect("map-event", self.on_map_keep_above)
         self.connect("window-state-event", self.on_window_state_changed)
         self.add_events(
-            Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK
+            Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.LEAVE_NOTIFY_MASK
+            | Gdk.EventMask.ENTER_NOTIFY_MASK
         )
         self.connect("button-release-event", self.on_window_button_release_event)
         self.connect("leave-notify-event", self.on_window_leave_notify_event)
+        self.connect("enter-notify-event", self.on_window_enter_notify_event)
         self._keep_above_retries = 0
         self._keep_above_timer_id = None
+        self._watchdog_source = None
+        self._inactivity_timer_id = None
+        self._is_faded = False
+        self._dwell_timer_id = None
+        self._dwell_target = None
+        self._pending_release_key = None
+        self._auto_cap_armed = False
         self.width = 0
         self.height = 0
         self.pos_x = 0
@@ -646,7 +674,24 @@ class VirtualKeyboard(Gtk.Window):
         self.opacity = "0.90"
         self.text_color = "white"
         self.style_variant = "onboard"
+        self.accent_color = DEFAULT_ACCENT_COLOR
+        self.font_scale = DEFAULT_FONT_SCALE
+        self.key_corner_radius = DEFAULT_KEY_RADIUS
+        self.key_spacing = DEFAULT_KEY_SPACING
         self.text_prediction_enabled = True
+        self.show_media_row = False
+        self.show_current_text_bar = False
+        self.show_fast_layout_bar = True
+        self.show_modifier_hints = True
+        self.input_trigger_mode = INPUT_TRIGGER_PRESS
+        self.auto_capitalize = False
+        self.auto_space_after_suggestion = False
+        self.sticky_modifier_lock = True
+        self.fade_on_inactivity = False
+        self.inactivity_delay_seconds = DEFAULT_INACTIVITY_DELAY_SECONDS
+        self.inactivity_fade_opacity = DEFAULT_INACTIVITY_FADE_OPACITY
+        self.dwell_enabled = False
+        self.dwell_time_ms = DEFAULT_DWELL_TIME_MS
         self.gesture_enabled = True
         self.gesture_visual_feedback_enabled = True
         self.start_minimized = False
@@ -659,6 +704,7 @@ class VirtualKeyboard(Gtk.Window):
         self.initialize_system_layout_sync()
 
         self.modifiers = {mod_key: False for mod_key in MODIFIER_KEYS}
+        self.locked_modifiers = {mod_key: False for mod_key in MODIFIER_KEYS}
         self.color_map = dict(COLOR_CHOICES)
         if self.width != 0:
             self.set_default_size(self.width, self.height)
@@ -670,7 +716,10 @@ class VirtualKeyboard(Gtk.Window):
         self.key_buttons = {}
         self.modifier_buttons = {}
         self.layout_button = None
+        self.layout_buttons = []
+        self.layout_button_box = None
         self.current_word = ""
+        self.current_text_buffer = ""
         self.suggestion_engine = HunspellSuggestionEngine(
             self.normalize_keyboard_layout(self.keyboard_layout)
         )
@@ -692,6 +741,27 @@ class VirtualKeyboard(Gtk.Window):
         self.settings_sync_layout_check = None
         self.settings_layout_combo = None
         self.settings_mode_combo = None
+        self.settings_theme_combo = None
+        self.settings_accent_combo = None
+        self.settings_opacity_scale = None
+        self.settings_font_scale = None
+        self.settings_radius_scale = None
+        self.settings_spacing_scale = None
+        self.settings_prediction_check = None
+        self.settings_media_row_check = None
+        self.settings_current_text_check = None
+        self.settings_fast_layout_check = None
+        self.settings_modifier_hints_check = None
+        self.settings_trigger_combo = None
+        self.settings_auto_cap_check = None
+        self.settings_auto_space_check = None
+        self.settings_sticky_lock_check = None
+        self.settings_dwell_check = None
+        self.settings_dwell_scale = None
+        self.settings_fade_check = None
+        self.settings_fade_delay_spin = None
+        self.settings_fade_opacity_scale = None
+        self.settings_start_minimized_check = None
         self._syncing_settings_dialog = False
         self.css_provider = Gtk.CssProvider()
         self._css_provider_registered = False
@@ -699,7 +769,13 @@ class VirtualKeyboard(Gtk.Window):
         self.caps_lock_active = False
         self._syncing_tray_items = False
         self.layout_character_lookup = {}
+        self.key_font_size = self.BASE_KEY_FONT_SIZE
+        self.secondary_key_font_size = max(
+            8, int(round(self.BASE_KEY_FONT_SIZE * 0.75))
+        )
+        self.header_font_size = self.BASE_HEADER_FONT_SIZE
         self.suggestion_font_size = self.BASE_SUGGESTION_FONT_SIZE
+        self.layout_scale = 1.0
         self.gesture_controller = None
         self.set_titlebar(self.header)
         self.set_name("vboard-main")
@@ -707,15 +783,21 @@ class VirtualKeyboard(Gtk.Window):
 
         self.create_settings()
         self.create_tray_icon()
-        try:
-            self.backend = UInputBackend()
-        except Exception as exc:
-            self.backend = NullInputBackend(
-                f"Could not initialize uinput backend ({exc}); key output is disabled"
-            )
+        self.backend = self._initialize_input_backend()
 
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self.content_box = content
         self.add(content)
+
+        self.media_bar = self.create_media_bar()
+        self.media_bar.set_no_show_all(True)
+        content.pack_start(self.media_bar, False, False, 0)
+        self.update_media_bar_visibility()
+
+        self.current_text_bar, self.current_text_label = self.create_current_text_bar()
+        self.current_text_bar.set_no_show_all(True)
+        content.pack_start(self.current_text_bar, False, False, 0)
+        self.update_current_text_bar_visibility()
 
         self.suggestion_revealer = Gtk.Revealer()
         self.suggestion_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_DOWN)
@@ -749,17 +831,228 @@ class VirtualKeyboard(Gtk.Window):
         self.apply_css()
         if self.text_prediction_enabled:
             GLib.idle_add(self.preload_suggestions)
-            GLib.idle_add(self.update_suggestion_bar_scale)
+        GLib.idle_add(self.update_suggestion_bar_scale)
 
         self.keyboard_layout = self.normalize_keyboard_layout(self.keyboard_layout)
         self.refresh_layout_character_lookup()
         self.populate_keyboard_grid()
         self.update_layout_button()
+        self.update_fast_layout_bar_visibility()
 
         if self.gesture_enabled:
             self.enable_gesture_typing(sync_controls=False, save=False)
 
         self.sync_caps_lock_from_system(connect=True)
+        self._watchdog_source = GLib.timeout_add(250, self._watchdog_tick)
+        self.reset_inactivity_timer()
+
+    def _initialize_input_backend(self):
+        errors = []
+        try:
+            return UInputBackend()
+        except Exception as exc:
+            errors.append(f"python-uinput: {exc}")
+
+        try:
+            backend = EvdevUInputBackend()
+            print("Using python-evdev uinput fallback backend.")
+            return backend
+        except Exception as exc:
+            errors.append(f"python-evdev: {exc}")
+
+        return NullInputBackend(
+            f"Could not initialize uinput backend ({'; '.join(errors)}); key output is disabled"
+        )
+
+    def _watchdog_tick(self):
+        if getattr(self, "backend", None) is not None:
+            self.backend.check_stuck_keys(MAX_KEY_HOLD_SECONDS)
+        return True
+
+    def stop_all_active_keys(self):
+        self.stop_key_repeat()
+        self.cancel_dwell_timer()
+        self._pending_release_key = None
+        if getattr(self, "backend", None) is not None:
+            self.backend.release_all_keys()
+
+    def create_media_bar(self):
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        bar.set_name("media-bar")
+        bar.set_margin_start(6)
+        bar.set_margin_end(6)
+        bar.set_margin_top(4)
+        bar.set_margin_bottom(0)
+        controls = (
+            ("☀−", "BrightnessDown", "Decrease screen brightness"),
+            ("☀+", "BrightnessUp", "Increase screen brightness"),
+            ("⏮", "PreviousSong", "Previous track"),
+            ("⏯", "PlayPause", "Play / Pause"),
+            ("⏭", "NextSong", "Next track"),
+            ("🔇", "VolumeMute", "Mute / Unmute"),
+            ("🔉", "VolumeDown", "Volume down"),
+            ("🔊", "VolumeUp", "Volume up"),
+            ("PrtSc", "Print", "Screenshot"),
+        )
+        for label, key_event, tooltip in controls:
+            btn = Gtk.Button(label=label)
+            btn.set_can_focus(False)
+            btn.set_focus_on_click(False)
+            btn.set_tooltip_text(tooltip)
+            btn.connect(
+                "clicked",
+                lambda _widget, k=key_event: self.on_media_key_clicked(k),
+            )
+            bar.pack_start(btn, True, True, 0)
+        return bar
+
+    def on_media_key_clicked(self, key_event):
+        self.reset_inactivity_timer()
+        empty_mods = {mod: False for mod in MODIFIER_KEYS}
+        self.backend.emit_key(key_event, empty_mods)
+
+    def update_media_bar_visibility(self):
+        if not hasattr(self, "media_bar") or self.media_bar is None:
+            return
+        if self.show_media_row:
+            for child in self.media_bar.get_children():
+                child.show_all()
+            self.media_bar.show()
+        else:
+            self.media_bar.hide()
+
+    def create_current_text_bar(self):
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        bar.set_name("current-text-bar")
+        bar.set_margin_start(6)
+        bar.set_margin_end(6)
+        bar.set_margin_top(4)
+        bar.set_margin_bottom(0)
+        label = Gtk.Label(label="")
+        label.set_name("current-text-label")
+        label.set_xalign(0.0)
+        label.set_ellipsize(3)  # Pango.EllipsizeMode.END
+        label.set_single_line_mode(True)
+        bar.pack_start(label, True, True, 0)
+
+        clear_btn = Gtk.Button(label="✕")
+        clear_btn.set_name("current-text-clear")
+        clear_btn.set_can_focus(False)
+        clear_btn.set_focus_on_click(False)
+        clear_btn.set_tooltip_text("Clear text preview buffer")
+        clear_btn.connect("clicked", lambda _w: self.clear_current_text_buffer())
+        bar.pack_end(clear_btn, False, False, 0)
+        return bar, label
+
+    def clear_current_text_buffer(self):
+        self.current_text_buffer = ""
+        self.update_current_text_label()
+
+    def update_current_text_label(self):
+        if not hasattr(self, "current_text_label") or self.current_text_label is None:
+            return
+        preview = self.current_text_buffer[-64:]
+        self.current_text_label.set_text(preview if preview else "Typing preview…")
+
+    def update_current_text_bar_visibility(self):
+        if not hasattr(self, "current_text_bar") or self.current_text_bar is None:
+            return
+        self.update_current_text_label()
+        if self.show_current_text_bar:
+            for child in self.current_text_bar.get_children():
+                child.show_all()
+            self.current_text_bar.show()
+        else:
+            self.current_text_bar.hide()
+
+    def update_fast_layout_bar_visibility(self):
+        if self.layout_button_box is None:
+            return
+        if self.show_fast_layout_bar:
+            self.layout_button_box.show_all()
+        else:
+            self.layout_button_box.hide()
+
+    def cancel_inactivity_timer(self):
+        if self._inactivity_timer_id is not None:
+            GLib.source_remove(self._inactivity_timer_id)
+            self._inactivity_timer_id = None
+
+    def set_faded_state(self, faded):
+        faded = bool(faded)
+        if faded == self._is_faded:
+            return
+        self._is_faded = faded
+        target_opacity = self.inactivity_fade_opacity if faded else 1.0
+        try:
+            Gtk.Widget.set_opacity(self, target_opacity)
+        except Exception:
+            pass
+
+    def reset_inactivity_timer(self):
+        self.cancel_inactivity_timer()
+        self.set_faded_state(False)
+        if not self.fade_on_inactivity:
+            return
+        delay_ms = max(1000, int(round(self.inactivity_delay_seconds * 1000)))
+        self._inactivity_timer_id = GLib.timeout_add(
+            delay_ms, self._on_inactivity_timeout
+        )
+
+    def _on_inactivity_timeout(self):
+        self._inactivity_timer_id = None
+        if self.fade_on_inactivity and self.get_visible():
+            self.set_faded_state(True)
+        return False
+
+    def on_window_enter_notify_event(self, widget, event):
+        self.reset_inactivity_timer()
+        return False
+
+    def cancel_dwell_timer(self):
+        if self._dwell_timer_id is not None:
+            GLib.source_remove(self._dwell_timer_id)
+            self._dwell_timer_id = None
+        if self._dwell_target is not None:
+            prev_widget, _prev_key = self._dwell_target
+            try:
+                prev_widget.get_style_context().remove_class("dwell-active")
+            except Exception:
+                pass
+            self._dwell_target = None
+
+    def start_dwell_timer(self, widget, key_event):
+        self.cancel_dwell_timer()
+        if not self.dwell_enabled:
+            return
+        self._dwell_target = (widget, key_event)
+        widget.get_style_context().add_class("dwell-active")
+        delay_ms = max(250, min(3000, int(self.dwell_time_ms)))
+        self._dwell_timer_id = GLib.timeout_add(
+            delay_ms, self._on_dwell_timeout, widget, key_event
+        )
+
+    def _on_dwell_timeout(self, widget, key_event):
+        self._dwell_timer_id = None
+        if self._dwell_target is None or self._dwell_target[0] is not widget:
+            return False
+        try:
+            widget.get_style_context().remove_class("dwell-active")
+        except Exception:
+            pass
+        self._dwell_target = None
+        self.reset_inactivity_timer()
+        if key_event in TV_ACTION_KEYS:
+            fake_event = type("DwellEvent", (), {"button": 1})()
+            self.handle_tv_action_key(widget, fake_event, key_event)
+        elif key_event == "CapsLock":
+            self.toggle_caps_lock()
+            self.reset_modifiers()
+        elif key_event in self.modifiers:
+            self.toggle_modifier_key(key_event)
+        else:
+            self.emit_key(key_event)
+        return False
 
     def get_app_icon_name(self):
         icon_theme = Gtk.IconTheme.get_default()
@@ -928,11 +1221,14 @@ class VirtualKeyboard(Gtk.Window):
 
     def toggle_visibility(self):
         if self.get_visible():
+            self.stop_all_active_keys()
+            self.cancel_inactivity_timer()
             self.hide()
         else:
             self.show()
             self.present()
             self.request_keep_above()
+            self.reset_inactivity_timer()
         self.update_tray_menu()
 
     def on_tray_activate(self, icon):
@@ -1221,7 +1517,7 @@ class VirtualKeyboard(Gtk.Window):
             self.layout_button_box.pack_start(button, False, False, 0)
             self.layout_buttons.append((button, layout_id, entry))
 
-        self.layout_button_box.show_all()
+        self.update_fast_layout_bar_visibility()
         self.update_layout_button()
 
     def activate_fast_switch_item(self, layout_id, entry=None):
@@ -1599,8 +1895,11 @@ class VirtualKeyboard(Gtk.Window):
             )
             style_context.remove_class("active-modifier")
             style_context.remove_class("active-command-modifier")
+            style_context.remove_class("locked-modifier")
             if active:
                 style_context.add_class(modifier_class)
+                if self.locked_modifiers.get(mod_key, False):
+                    style_context.add_class("locked-modifier")
 
         caps_button = self.key_buttons.get("CapsLock")
         if caps_button is not None:
@@ -1609,6 +1908,23 @@ class VirtualKeyboard(Gtk.Window):
             style_context.remove_class("active-command-modifier")
             if self.caps_lock_active:
                 style_context.add_class("active-command-modifier")
+
+        self.update_modifier_hints()
+
+    def update_modifier_hints(self):
+        altgr_active = bool(self.modifiers.get("Alt_R", False))
+        show_hints = altgr_active and self.show_modifier_hints
+        altgr_keys = (
+            set(self.get_active_altgr_map()) | set(self.get_active_altgr_shifted_map())
+            if show_hints
+            else set()
+        )
+        for key_event, button in self.key_buttons.items():
+            ctx = button.get_style_context()
+            if key_event in altgr_keys:
+                ctx.add_class("altgr-hint")
+            else:
+                ctx.remove_class("altgr-hint")
 
     def set_keyboard_layout(self, layout_key, sync_system=True, save=True):
         normalized_layout = self.normalize_keyboard_layout(layout_key)
@@ -1658,11 +1974,61 @@ class VirtualKeyboard(Gtk.Window):
         if save:
             self.save_settings()
 
+    def get_active_theme_label(self):
+        if self.style_variant == "apple_dark":
+            return "Apple macOS Dark"
+        if self.style_variant == "apple_light":
+            return "Apple macOS Light"
+        if self.style_variant == "onboard":
+            return "Onboard Droid Theme"
+        if self.style_variant == "high_contrast_tv":
+            return "High Contrast TV"
+        if self.style_variant == "enhanced":
+            for label, color in COLOR_CHOICES:
+                if (
+                    isinstance(color, tuple)
+                    and len(color) == 2
+                    and color[0] == ENHANCED_BACKGROUND_PRESET
+                    and color[1] == self.bg_color
+                ):
+                    return label
+        for label, color in COLOR_CHOICES:
+            if color == self.bg_color:
+                return label
+        return None
+
+    def sync_theme_comboboxes(self):
+        active_label = self.get_active_theme_label()
+        if active_label is None:
+            return
+        if self.color_combobox is not None:
+            for index, (label, _color) in enumerate(COLOR_CHOICES, start=1):
+                if label == active_label:
+                    if self.color_combobox.get_active() != index:
+                        self.color_combobox.set_active(index)
+                    break
+        if self.settings_theme_combo is not None:
+            if self.settings_theme_combo.get_active_id() != active_label:
+                self.settings_theme_combo.set_active_id(active_label)
+
     def sync_settings_dialog_controls(self):
         if self.settings_dialog is None:
             return
         self._syncing_settings_dialog = True
         try:
+            self.sync_theme_comboboxes()
+            if self.settings_accent_combo is not None:
+                self.settings_accent_combo.set_active_id(self.accent_color)
+            if self.settings_opacity_scale is not None:
+                self.settings_opacity_scale.set_value(
+                    round(self._parse_opacity(self.opacity) * 100)
+                )
+            if self.settings_font_scale is not None:
+                self.settings_font_scale.set_value(round(self.font_scale * 100))
+            if self.settings_radius_scale is not None:
+                self.settings_radius_scale.set_value(self.key_corner_radius)
+            if self.settings_spacing_scale is not None:
+                self.settings_spacing_scale.set_value(self.key_spacing)
             if self.settings_sync_layout_check is not None:
                 self.settings_sync_layout_check.set_active(self.sync_system_layout)
             if self.settings_layout_combo is not None:
@@ -1675,6 +2041,43 @@ class VirtualKeyboard(Gtk.Window):
                         self.settings_layout_combo.set_active_id(self.keyboard_layout)
             if self.settings_mode_combo is not None:
                 self.settings_mode_combo.set_active_id(self.keyboard_mode)
+            if self.settings_prediction_check is not None:
+                self.settings_prediction_check.set_active(self.text_prediction_enabled)
+            if self.settings_media_row_check is not None:
+                self.settings_media_row_check.set_active(self.show_media_row)
+            if self.settings_current_text_check is not None:
+                self.settings_current_text_check.set_active(self.show_current_text_bar)
+            if self.settings_fast_layout_check is not None:
+                self.settings_fast_layout_check.set_active(self.show_fast_layout_bar)
+            if self.settings_modifier_hints_check is not None:
+                self.settings_modifier_hints_check.set_active(self.show_modifier_hints)
+            if self.settings_trigger_combo is not None:
+                self.settings_trigger_combo.set_active_id(self.input_trigger_mode)
+            if self.settings_auto_cap_check is not None:
+                self.settings_auto_cap_check.set_active(self.auto_capitalize)
+            if self.settings_auto_space_check is not None:
+                self.settings_auto_space_check.set_active(
+                    self.auto_space_after_suggestion
+                )
+            if self.settings_sticky_lock_check is not None:
+                self.settings_sticky_lock_check.set_active(self.sticky_modifier_lock)
+            if self.settings_dwell_check is not None:
+                self.settings_dwell_check.set_active(self.dwell_enabled)
+            if self.settings_dwell_scale is not None:
+                self.settings_dwell_scale.set_value(self.dwell_time_ms)
+                self.settings_dwell_scale.set_sensitive(self.dwell_enabled)
+            if self.settings_fade_check is not None:
+                self.settings_fade_check.set_active(self.fade_on_inactivity)
+            if self.settings_fade_delay_spin is not None:
+                self.settings_fade_delay_spin.set_value(self.inactivity_delay_seconds)
+                self.settings_fade_delay_spin.set_sensitive(self.fade_on_inactivity)
+            if self.settings_fade_opacity_scale is not None:
+                self.settings_fade_opacity_scale.set_value(
+                    round(self.inactivity_fade_opacity * 100)
+                )
+                self.settings_fade_opacity_scale.set_sensitive(self.fade_on_inactivity)
+            if self.settings_start_minimized_check is not None:
+                self.settings_start_minimized_check.set_active(self.start_minimized)
         finally:
             self._syncing_settings_dialog = False
 
@@ -1683,7 +2086,11 @@ class VirtualKeyboard(Gtk.Window):
             self.settings_gesture_check is not None
             and self.settings_gesture_check.get_active() != self.gesture_enabled
         ):
-            self.settings_gesture_check.set_active(self.gesture_enabled)
+            self._syncing_settings_dialog = True
+            try:
+                self.settings_gesture_check.set_active(self.gesture_enabled)
+            finally:
+                self._syncing_settings_dialog = False
         self.sync_tray_items()
 
     def sync_visual_feedback_controls(self):
@@ -1693,9 +2100,13 @@ class VirtualKeyboard(Gtk.Window):
                 self.settings_visual_feedback_check.get_active()
                 != self.gesture_visual_feedback_enabled
             ):
-                self.settings_visual_feedback_check.set_active(
-                    self.gesture_visual_feedback_enabled
-                )
+                self._syncing_settings_dialog = True
+                try:
+                    self.settings_visual_feedback_check.set_active(
+                        self.gesture_visual_feedback_enabled
+                    )
+                finally:
+                    self._syncing_settings_dialog = False
         self.sync_tray_items()
 
     def set_gesture_visual_feedback_enabled(self, enabled, sync_controls=True):
@@ -1755,7 +2166,7 @@ class VirtualKeyboard(Gtk.Window):
         about_dialog.set_program_name(APP_DISPLAY_NAME)
         about_dialog.set_version(VERSION)
         about_dialog.set_comments(
-            "A lightweight virtual keyboard for GNU/Linux with Wayland support.\n\n"
+            "A lightweight, customizable virtual keyboard for GNU/Linux with Wayland support.\n\n"
             "Originally created by mdev588. The original project was archived, "
             "and it is now maintained by Archisman Panigrahi.\n\n"
             "Original project: https://github.com/mdev588/vboard\n"
@@ -1779,13 +2190,19 @@ class VirtualKeyboard(Gtk.Window):
         if getattr(self, "_cleaned_up", False):
             return
         self._cleaned_up = True
-        self.stop_key_repeat()
+        self.stop_all_active_keys()
+        self.cancel_inactivity_timer()
+        if self._watchdog_source is not None:
+            GLib.source_remove(self._watchdog_source)
+            self._watchdog_source = None
         if self._keep_above_timer_id is not None:
             GLib.source_remove(self._keep_above_timer_id)
             self._keep_above_timer_id = None
         if self.gesture_controller is not None:
             self.gesture_controller.destroy()
             self.gesture_controller = None
+        if getattr(self, "backend", None) is not None:
+            self.backend.destroy()
         self.close_system_layout_sync()
         self.save_settings()
         self.clear_tray_icon()
@@ -1810,6 +2227,8 @@ class VirtualKeyboard(Gtk.Window):
         if self.tray_icon is None:
             self.cleanup_on_destroy()
             return False
+        self.stop_all_active_keys()
+        self.cancel_inactivity_timer()
         self.save_settings()
         self.hide()
         self.update_tray_menu()
@@ -1849,29 +2268,7 @@ class VirtualKeyboard(Gtk.Window):
         for label, _color in COLOR_CHOICES:
             self.color_combobox.append_text(label)
 
-        if self.style_variant == "onboard":
-            active_label = "Onboard Droid Theme"
-        elif self.style_variant == "high_contrast_tv":
-            active_label = "High Contrast TV"
-        else:
-            active_label = None
-
-        if self.style_variant == "enhanced":
-            for label, color in COLOR_CHOICES:
-                if (
-                    isinstance(color, tuple)
-                    and len(color) == 2
-                    and color[0] == ENHANCED_BACKGROUND_PRESET
-                    and color[1] == self.bg_color
-                ):
-                    active_label = label
-                    break
-        elif active_label is None:
-            for label, color in COLOR_CHOICES:
-                if color == self.bg_color:
-                    active_label = label
-                    break
-
+        active_label = self.get_active_theme_label()
         active_index = 0
         if active_label is not None:
             for index, (label, _color) in enumerate(COLOR_CHOICES, start=1):
@@ -1881,59 +2278,335 @@ class VirtualKeyboard(Gtk.Window):
 
         self.color_combobox.set_active(active_index)
 
+    def set_theme_by_label(self, selected_label, save=True):
+        selected_color = self.color_map.get(selected_label)
+        if selected_color is None:
+            return
+        if selected_color == APPLE_DARK_BACKGROUND_PRESET:
+            self.style_variant = "apple_dark"
+            self.text_color = "white"
+        elif selected_color == APPLE_LIGHT_BACKGROUND_PRESET:
+            self.style_variant = "apple_light"
+            self.text_color = "#1D1D1F"
+        elif selected_color == ONBOARD_BACKGROUND_PRESET:
+            self.style_variant = "onboard"
+            self.text_color = "white"
+        elif selected_color == HIGH_CONTRAST_TV_BACKGROUND_PRESET:
+            self.style_variant = "high_contrast_tv"
+            self.text_color = "white"
+        elif (
+            isinstance(selected_color, tuple)
+            and len(selected_color) == 2
+            and selected_color[0] == ENHANCED_BACKGROUND_PRESET
+        ):
+            self.style_variant = "enhanced"
+            self.bg_color = selected_color[1]
+            self.text_color = (
+                "#1C1C1C" if self.bg_color in LIGHT_BACKGROUND_COLORS else "white"
+            )
+        else:
+            self.style_variant = "classic"
+            self.bg_color = selected_color
+            self.text_color = (
+                "#1C1C1C" if self.bg_color in LIGHT_BACKGROUND_COLORS else "white"
+            )
+        self.apply_css()
+        self.sync_settings_dialog_controls()
+        if save:
+            self.save_settings()
+
+    def set_font_scale(self, scale, save=True):
+        clamped = max(0.75, min(1.60, round(float(scale), 2)))
+        if clamped == self.font_scale:
+            return
+        self.font_scale = clamped
+        self._last_suggestion_scale = None
+        self.update_suggestion_bar_scale()
+        self.apply_css()
+        if save:
+            self.save_settings()
+
+    def set_key_corner_radius(self, radius, save=True):
+        clamped = max(0, min(16, int(round(radius))))
+        if clamped == self.key_corner_radius:
+            return
+        self.key_corner_radius = clamped
+        self.apply_css()
+        if save:
+            self.save_settings()
+
+    def set_key_spacing(self, spacing, save=True):
+        clamped = max(1, min(8, int(round(spacing))))
+        if clamped == self.key_spacing:
+            return
+        self.key_spacing = clamped
+        self.apply_css()
+        if save:
+            self.save_settings()
+
+    def set_accent_color(self, accent_hex, save=True):
+        if not isinstance(accent_hex, str) or not accent_hex.startswith("#"):
+            return
+        if accent_hex == self.accent_color:
+            return
+        self.accent_color = accent_hex
+        self.apply_css()
+        if save:
+            self.save_settings()
+
+    def set_show_media_row(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.show_media_row:
+            return
+        self.show_media_row = enabled
+        self.update_media_bar_visibility()
+        self._last_suggestion_scale = None
+        self.update_suggestion_bar_scale()
+        if save:
+            self.save_settings()
+
+    def set_show_current_text_bar(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.show_current_text_bar:
+            return
+        self.show_current_text_bar = enabled
+        self.update_current_text_bar_visibility()
+        self._last_suggestion_scale = None
+        self.update_suggestion_bar_scale()
+        if save:
+            self.save_settings()
+
+    def set_show_fast_layout_bar(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.show_fast_layout_bar:
+            return
+        self.show_fast_layout_bar = enabled
+        self.update_fast_layout_bar_visibility()
+        if save:
+            self.save_settings()
+
+    def set_show_modifier_hints(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.show_modifier_hints:
+            return
+        self.show_modifier_hints = enabled
+        self.update_modifier_hints()
+        if save:
+            self.save_settings()
+
+    def set_input_trigger_mode(self, mode, save=True):
+        if mode not in (INPUT_TRIGGER_PRESS, INPUT_TRIGGER_RELEASE):
+            return
+        if mode == self.input_trigger_mode:
+            return
+        self.input_trigger_mode = mode
+        self._pending_release_key = None
+        if save:
+            self.save_settings()
+
+    def set_auto_capitalize(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.auto_capitalize:
+            return
+        self.auto_capitalize = enabled
+        if save:
+            self.save_settings()
+
+    def set_auto_space_after_suggestion(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.auto_space_after_suggestion:
+            return
+        self.auto_space_after_suggestion = enabled
+        if save:
+            self.save_settings()
+
+    def set_sticky_modifier_lock(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.sticky_modifier_lock:
+            return
+        self.sticky_modifier_lock = enabled
+        if not enabled:
+            for mod_key in self.locked_modifiers:
+                self.locked_modifiers[mod_key] = False
+            self.apply_modifier_styles()
+        if save:
+            self.save_settings()
+
+    def set_dwell_enabled(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.dwell_enabled:
+            return
+        self.dwell_enabled = enabled
+        if not enabled:
+            self.cancel_dwell_timer()
+        if self.settings_dwell_scale is not None:
+            self.settings_dwell_scale.set_sensitive(enabled)
+        if save:
+            self.save_settings()
+
+    def set_dwell_time_ms(self, dwell_ms, save=True):
+        clamped = max(300, min(2500, int(round(dwell_ms))))
+        if clamped == self.dwell_time_ms:
+            return
+        self.dwell_time_ms = clamped
+        if save:
+            self.save_settings()
+
+    def set_fade_on_inactivity(self, enabled, save=True):
+        enabled = bool(enabled)
+        if enabled == self.fade_on_inactivity:
+            return
+        self.fade_on_inactivity = enabled
+        self.reset_inactivity_timer()
+        if self.settings_fade_delay_spin is not None:
+            self.settings_fade_delay_spin.set_sensitive(enabled)
+        if self.settings_fade_opacity_scale is not None:
+            self.settings_fade_opacity_scale.set_sensitive(enabled)
+        if save:
+            self.save_settings()
+
+    def set_inactivity_delay_seconds(self, seconds, save=True):
+        clamped = max(3, min(120, int(round(seconds))))
+        if clamped == self.inactivity_delay_seconds:
+            return
+        self.inactivity_delay_seconds = clamped
+        self.reset_inactivity_timer()
+        if save:
+            self.save_settings()
+
+    def set_inactivity_fade_opacity(self, fade_opacity, save=True):
+        clamped = max(0.10, min(0.85, round(float(fade_opacity), 2)))
+        if clamped == self.inactivity_fade_opacity:
+            return
+        self.inactivity_fade_opacity = clamped
+        if self._is_faded:
+            self.set_faded_state(False)
+            self.set_faded_state(True)
+        if save:
+            self.save_settings()
+
+    def reset_appearance_defaults(self, _widget=None):
+        self.style_variant = "apple_dark"
+        self.accent_color = DEFAULT_ACCENT_COLOR
+        self.opacity = "0.92"
+        self.font_scale = DEFAULT_FONT_SCALE
+        self.key_corner_radius = DEFAULT_KEY_RADIUS
+        self.key_spacing = DEFAULT_KEY_SPACING
+        if hasattr(self, "opacity_btn") and self.opacity_btn is not None:
+            self.opacity_btn.set_label(self.opacity)
+        self._last_suggestion_scale = None
+        self.update_suggestion_bar_scale()
+        self.apply_css()
+        self.sync_settings_dialog_controls()
+        self.save_settings()
+
     def open_settings_dialog(self, widget=None):
         if self.settings_dialog is not None:
             self.settings_dialog.present()
             return
 
         dialog = Gtk.Dialog(
-            title="Options for Vboard",
+            title="Customize Vboard",
             transient_for=self,
             modal=True,
         )
+        dialog.set_default_size(500, 420)
         dialog.add_button("Close", Gtk.ResponseType.CLOSE)
         dialog.connect("response", self.on_settings_dialog_response)
         dialog.connect("destroy", self.on_settings_dialog_destroy)
 
         content = dialog.get_content_area()
-        content.set_border_width(12)
-        grid = Gtk.Grid(column_spacing=12, row_spacing=10)
-        content.add(grid)
+        content.set_border_width(10)
+        content.set_spacing(10)
 
-        prediction_check = Gtk.CheckButton(label="Text Prediction")
-        prediction_check.set_active(self.text_prediction_enabled)
-        prediction_check.connect("toggled", self.on_settings_prediction_toggled)
-        grid.attach(prediction_check, 0, 0, 2, 1)
+        notebook = Gtk.Notebook()
+        content.pack_start(notebook, True, True, 0)
 
-        gesture_check = Gtk.CheckButton(
-            label="Touch Typing (requires app restart)"
-        )
-        gesture_check.set_active(self.gesture_enabled)
-        gesture_check.connect("toggled", self.on_settings_gesture_toggled)
-        grid.attach(gesture_check, 0, 1, 2, 1)
-        self.settings_gesture_check = gesture_check
+        # --- Tab 1: Appearance ---
+        appearance_grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        appearance_grid.set_border_width(12)
 
-        visual_feedback_check = Gtk.CheckButton(label="Visual Feedback")
-        visual_feedback_check.set_active(self.gesture_visual_feedback_enabled)
-        visual_feedback_check.set_sensitive(self.gesture_enabled)
-        visual_feedback_check.connect(
-            "toggled", self.on_settings_visual_feedback_toggled
-        )
-        grid.attach(visual_feedback_check, 0, 2, 2, 1)
-        self.settings_visual_feedback_check = visual_feedback_check
+        theme_label = Gtk.Label(label="Theme", xalign=0)
+        theme_combo = Gtk.ComboBoxText()
+        for label, _color in COLOR_CHOICES:
+            theme_combo.append(label, label)
+        active_theme_label = self.get_active_theme_label()
+        if active_theme_label:
+            theme_combo.set_active_id(active_theme_label)
+        theme_combo.connect("changed", self.on_settings_theme_changed)
+        appearance_grid.attach(theme_label, 0, 0, 1, 1)
+        appearance_grid.attach(theme_combo, 1, 0, 2, 1)
+        self.settings_theme_combo = theme_combo
 
-        start_minimized_check = Gtk.CheckButton(label="Start Minimized")
-        start_minimized_check.set_active(self.start_minimized)
-        start_minimized_check.connect(
-            "toggled", self.on_settings_start_minimized_toggled
-        )
-        grid.attach(start_minimized_check, 0, 3, 2, 1)
+        accent_label = Gtk.Label(label="Accent Color", xalign=0)
+        accent_combo = Gtk.ComboBoxText()
+        for accent_name, accent_hex in ACCENT_COLOR_CHOICES:
+            accent_combo.append(accent_hex, accent_name)
+        accent_combo.set_active_id(self.accent_color)
+        accent_combo.connect("changed", self.on_settings_accent_changed)
+        appearance_grid.attach(accent_label, 0, 1, 1, 1)
+        appearance_grid.attach(accent_combo, 1, 1, 2, 1)
+        self.settings_accent_combo = accent_combo
 
-        sync_layout_check = Gtk.CheckButton(label="Sync with System Keyboard Layout")
-        sync_layout_check.set_active(self.sync_system_layout)
-        sync_layout_check.connect("toggled", self.on_settings_sync_layout_toggled)
-        grid.attach(sync_layout_check, 0, 4, 2, 1)
-        self.settings_sync_layout_check = sync_layout_check
+        opacity_label = Gtk.Label(label="Opacity (%)", xalign=0)
+        opacity_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 30, 100, 1)
+        opacity_scale.set_digits(0)
+        opacity_scale.set_hexpand(True)
+        opacity_scale.set_value(round(self._parse_opacity(self.opacity) * 100))
+        opacity_scale.connect("value-changed", self.on_settings_opacity_changed)
+        appearance_grid.attach(opacity_label, 0, 2, 1, 1)
+        appearance_grid.attach(opacity_scale, 1, 2, 2, 1)
+        self.settings_opacity_scale = opacity_scale
+
+        font_label = Gtk.Label(label="Key Font Scale (%)", xalign=0)
+        font_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 75, 160, 5)
+        font_scale.set_digits(0)
+        font_scale.set_hexpand(True)
+        font_scale.set_value(round(self.font_scale * 100))
+        font_scale.connect("value-changed", self.on_settings_font_scale_changed)
+        appearance_grid.attach(font_label, 0, 3, 1, 1)
+        appearance_grid.attach(font_scale, 1, 3, 2, 1)
+        self.settings_font_scale = font_scale
+
+        radius_label = Gtk.Label(label="Key Corner Radius (px)", xalign=0)
+        radius_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 16, 1)
+        radius_scale.set_digits(0)
+        radius_scale.set_hexpand(True)
+        radius_scale.set_value(self.key_corner_radius)
+        radius_scale.connect("value-changed", self.on_settings_radius_changed)
+        appearance_grid.attach(radius_label, 0, 4, 1, 1)
+        appearance_grid.attach(radius_scale, 1, 4, 2, 1)
+        self.settings_radius_scale = radius_scale
+
+        spacing_label = Gtk.Label(label="Key Spacing (px)", xalign=0)
+        spacing_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 1, 8, 1)
+        spacing_scale.set_digits(0)
+        spacing_scale.set_hexpand(True)
+        spacing_scale.set_value(self.key_spacing)
+        spacing_scale.connect("value-changed", self.on_settings_spacing_changed)
+        appearance_grid.attach(spacing_label, 0, 5, 1, 1)
+        appearance_grid.attach(spacing_scale, 1, 5, 2, 1)
+        self.settings_spacing_scale = spacing_scale
+
+        reset_btn = Gtk.Button(label="Apply Apple macOS Dark Defaults")
+        reset_btn.connect("clicked", self.reset_appearance_defaults)
+        appearance_grid.attach(reset_btn, 0, 6, 3, 1)
+
+        notebook.append_page(appearance_grid, Gtk.Label(label="Appearance"))
+
+        # --- Tab 2: Toolbars & Layout ---
+        layout_grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        layout_grid.set_border_width(12)
+
+        mode_label = Gtk.Label(label="Keyboard Style", xalign=0)
+        mode_combo = Gtk.ComboBoxText()
+        for mode_id, mode_name in KEYBOARD_MODE_CHOICES:
+            mode_combo.append(mode_id, mode_name)
+        mode_combo.set_active_id(self.keyboard_mode)
+        mode_combo.connect("changed", self.on_settings_mode_changed)
+        layout_grid.attach(mode_label, 0, 0, 1, 1)
+        layout_grid.attach(mode_combo, 1, 0, 2, 1)
+        self.settings_mode_combo = mode_combo
 
         layout_label = Gtk.Label(label="Keyboard Layout", xalign=0)
         layout_combo = Gtk.ComboBoxText()
@@ -1945,29 +2618,188 @@ class VirtualKeyboard(Gtk.Window):
                 layout_combo.append(self.keyboard_layout, active_config["label"])
         layout_combo.set_active_id(self.keyboard_layout)
         layout_combo.connect("changed", self.on_settings_layout_changed)
-        grid.attach(layout_label, 0, 5, 1, 1)
-        grid.attach(layout_combo, 1, 5, 2, 1)
+        layout_grid.attach(layout_label, 0, 1, 1, 1)
+        layout_grid.attach(layout_combo, 1, 1, 2, 1)
         self.settings_layout_combo = layout_combo
 
-        mode_label = Gtk.Label(label="Keyboard Style", xalign=0)
-        mode_combo = Gtk.ComboBoxText()
-        for mode_id, mode_name in KEYBOARD_MODE_CHOICES:
-            mode_combo.append(mode_id, mode_name)
-        mode_combo.set_active_id(self.keyboard_mode)
-        mode_combo.connect("changed", self.on_settings_mode_changed)
-        grid.attach(mode_label, 0, 6, 1, 1)
-        grid.attach(mode_combo, 1, 6, 2, 1)
-        self.settings_mode_combo = mode_combo
+        sync_layout_check = Gtk.CheckButton(label="Sync with System Keyboard Layout")
+        sync_layout_check.set_active(self.sync_system_layout)
+        sync_layout_check.connect("toggled", self.on_settings_sync_layout_toggled)
+        layout_grid.attach(sync_layout_check, 0, 2, 3, 1)
+        self.settings_sync_layout_check = sync_layout_check
 
+        prediction_check = Gtk.CheckButton(label="Show Typing Suggestions Toolbar")
+        prediction_check.set_active(self.text_prediction_enabled)
+        prediction_check.connect("toggled", self.on_settings_prediction_toggled)
+        layout_grid.attach(prediction_check, 0, 3, 3, 1)
+        self.settings_prediction_check = prediction_check
+
+        current_text_check = Gtk.CheckButton(label="Show Current Text Preview Toolbar")
+        current_text_check.set_active(self.show_current_text_bar)
+        current_text_check.connect("toggled", self.on_settings_current_text_toggled)
+        layout_grid.attach(current_text_check, 0, 4, 3, 1)
+        self.settings_current_text_check = current_text_check
+
+        media_row_check = Gtk.CheckButton(
+            label="Show System & Media Controls Row (Brightness, Volume, Playback)"
+        )
+        media_row_check.set_active(self.show_media_row)
+        media_row_check.connect("toggled", self.on_settings_media_row_toggled)
+        layout_grid.attach(media_row_check, 0, 5, 3, 1)
+        self.settings_media_row_check = media_row_check
+
+        fast_layout_check = Gtk.CheckButton(
+            label="Show Top-Bar Fast Language Switcher (PL / UA / RU / EN / AR)"
+        )
+        fast_layout_check.set_active(self.show_fast_layout_bar)
+        fast_layout_check.connect("toggled", self.on_settings_fast_layout_toggled)
+        layout_grid.attach(fast_layout_check, 0, 6, 3, 1)
+        self.settings_fast_layout_check = fast_layout_check
+
+        modifier_hints_check = Gtk.CheckButton(
+            label="Highlight Alternate / Accent Keys in Orange (AltGr Viewer)"
+        )
+        modifier_hints_check.set_active(self.show_modifier_hints)
+        modifier_hints_check.connect("toggled", self.on_settings_modifier_hints_toggled)
+        layout_grid.attach(modifier_hints_check, 0, 7, 3, 1)
+        self.settings_modifier_hints_check = modifier_hints_check
+
+        notebook.append_page(layout_grid, Gtk.Label(label="Toolbars & Layout"))
+
+        # --- Tab 3: Typing & Accessibility ---
+        typing_grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        typing_grid.set_border_width(12)
+
+        trigger_label = Gtk.Label(label="Key Activation", xalign=0)
+        trigger_combo = Gtk.ComboBoxText()
+        for mode_id, mode_label in INPUT_TRIGGER_CHOICES:
+            trigger_combo.append(mode_id, mode_label)
+        trigger_combo.set_active_id(self.input_trigger_mode)
+        trigger_combo.connect("changed", self.on_settings_trigger_changed)
+        typing_grid.attach(trigger_label, 0, 0, 1, 1)
+        typing_grid.attach(trigger_combo, 1, 0, 2, 1)
+        self.settings_trigger_combo = trigger_combo
+
+        auto_cap_check = Gtk.CheckButton(label="Auto-Capitalize Sentences (. ! ?)")
+        auto_cap_check.set_active(self.auto_capitalize)
+        auto_cap_check.connect("toggled", self.on_settings_auto_cap_toggled)
+        typing_grid.attach(auto_cap_check, 0, 1, 3, 1)
+        self.settings_auto_cap_check = auto_cap_check
+
+        auto_space_check = Gtk.CheckButton(
+            label="Insert Space Automatically After Accepting Suggestion"
+        )
+        auto_space_check.set_active(self.auto_space_after_suggestion)
+        auto_space_check.connect("toggled", self.on_settings_auto_space_toggled)
+        typing_grid.attach(auto_space_check, 0, 2, 3, 1)
+        self.settings_auto_space_check = auto_space_check
+
+        sticky_lock_check = Gtk.CheckButton(
+            label="Sticky Modifiers (Tap Twice to Lock Shift / Ctrl / Alt / AltGr)"
+        )
+        sticky_lock_check.set_active(self.sticky_modifier_lock)
+        sticky_lock_check.connect("toggled", self.on_settings_sticky_lock_toggled)
+        typing_grid.attach(sticky_lock_check, 0, 3, 3, 1)
+        self.settings_sticky_lock_check = sticky_lock_check
+
+        gesture_check = Gtk.CheckButton(label="Touch / Swipe Typing")
+        gesture_check.set_active(self.gesture_enabled)
+        gesture_check.connect("toggled", self.on_settings_gesture_toggled)
+        typing_grid.attach(gesture_check, 0, 4, 3, 1)
+        self.settings_gesture_check = gesture_check
+
+        visual_feedback_check = Gtk.CheckButton(label="Swipe Trail Visual Feedback")
+        visual_feedback_check.set_active(self.gesture_visual_feedback_enabled)
+        visual_feedback_check.set_sensitive(self.gesture_enabled)
+        visual_feedback_check.connect(
+            "toggled", self.on_settings_visual_feedback_toggled
+        )
+        typing_grid.attach(visual_feedback_check, 0, 5, 3, 1)
+        self.settings_visual_feedback_check = visual_feedback_check
+
+        dwell_check = Gtk.CheckButton(label="Hover Dwell Typing (Auto-Click on Rest)")
+        dwell_check.set_active(self.dwell_enabled)
+        dwell_check.connect("toggled", self.on_settings_dwell_toggled)
+        typing_grid.attach(dwell_check, 0, 6, 3, 1)
+        self.settings_dwell_check = dwell_check
+
+        dwell_label = Gtk.Label(label="Dwell Delay (ms)", xalign=0)
+        dwell_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 300, 2000, 50)
+        dwell_scale.set_digits(0)
+        dwell_scale.set_hexpand(True)
+        dwell_scale.set_value(self.dwell_time_ms)
+        dwell_scale.set_sensitive(self.dwell_enabled)
+        dwell_scale.connect("value-changed", self.on_settings_dwell_time_changed)
+        typing_grid.attach(dwell_label, 0, 7, 1, 1)
+        typing_grid.attach(dwell_scale, 1, 7, 2, 1)
+        self.settings_dwell_scale = dwell_scale
+
+        notebook.append_page(typing_grid, Gtk.Label(label="Typing & Accessibility"))
+
+        # --- Tab 4: Fade & Window ---
+        window_grid = Gtk.Grid(column_spacing=12, row_spacing=10)
+        window_grid.set_border_width(12)
+
+        fade_check = Gtk.CheckButton(
+            label="Fade Keyboard Panel After Inactivity (Hover to Wake)"
+        )
+        fade_check.set_active(self.fade_on_inactivity)
+        fade_check.connect("toggled", self.on_settings_fade_toggled)
+        window_grid.attach(fade_check, 0, 0, 3, 1)
+        self.settings_fade_check = fade_check
+
+        fade_delay_label = Gtk.Label(label="Inactivity Delay (seconds)", xalign=0)
+        fade_delay_spin = Gtk.SpinButton.new_with_range(3, 120, 1)
+        fade_delay_spin.set_value(self.inactivity_delay_seconds)
+        fade_delay_spin.set_sensitive(self.fade_on_inactivity)
+        fade_delay_spin.connect("value-changed", self.on_settings_fade_delay_changed)
+        window_grid.attach(fade_delay_label, 0, 1, 1, 1)
+        window_grid.attach(fade_delay_spin, 1, 1, 2, 1)
+        self.settings_fade_delay_spin = fade_delay_spin
+
+        fade_opacity_label = Gtk.Label(label="Faded Opacity (%)", xalign=0)
+        fade_opacity_scale = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, 10, 85, 5
+        )
+        fade_opacity_scale.set_digits(0)
+        fade_opacity_scale.set_hexpand(True)
+        fade_opacity_scale.set_value(round(self.inactivity_fade_opacity * 100))
+        fade_opacity_scale.set_sensitive(self.fade_on_inactivity)
+        fade_opacity_scale.connect(
+            "value-changed", self.on_settings_fade_opacity_changed
+        )
+        window_grid.attach(fade_opacity_label, 0, 2, 1, 1)
+        window_grid.attach(fade_opacity_scale, 1, 2, 2, 1)
+        self.settings_fade_opacity_scale = fade_opacity_scale
+
+        start_minimized_check = Gtk.CheckButton(label="Start Minimized to System Tray")
+        start_minimized_check.set_active(self.start_minimized)
+        start_minimized_check.connect(
+            "toggled", self.on_settings_start_minimized_toggled
+        )
+        window_grid.attach(start_minimized_check, 0, 3, 3, 1)
+        self.settings_start_minimized_check = start_minimized_check
+
+        backend_info = Gtk.Label(
+            label=f"Active input backend: {getattr(self.backend, 'name', 'unknown')} (stuck-key watchdog active)",
+            xalign=0,
+        )
+        window_grid.attach(backend_info, 0, 4, 3, 1)
+
+        notebook.append_page(window_grid, Gtk.Label(label="Fade & Window"))
+
+        # Bottom utility buttons
+        footer_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         about_button = Gtk.Button(label="About")
         about_button.connect("clicked", self.on_settings_about_clicked)
         report_bugs_button = Gtk.Button(label="Report bugs")
         report_bugs_button.connect("clicked", self.on_settings_report_bugs_clicked)
         quit_button = Gtk.Button(label="Quit")
         quit_button.connect("clicked", self.on_settings_quit_clicked)
-        grid.attach(about_button, 0, 7, 1, 1)
-        grid.attach(report_bugs_button, 1, 7, 1, 1)
-        grid.attach(quit_button, 2, 7, 1, 1)
+        footer_box.pack_start(about_button, False, False, 0)
+        footer_box.pack_start(report_bugs_button, False, False, 0)
+        footer_box.pack_end(quit_button, False, False, 0)
+        content.pack_start(footer_box, False, False, 0)
 
         self.settings_dialog = dialog
         dialog.show_all()
@@ -1982,6 +2814,117 @@ class VirtualKeyboard(Gtk.Window):
         self.settings_sync_layout_check = None
         self.settings_layout_combo = None
         self.settings_mode_combo = None
+        self.settings_theme_combo = None
+        self.settings_accent_combo = None
+        self.settings_opacity_scale = None
+        self.settings_font_scale = None
+        self.settings_radius_scale = None
+        self.settings_spacing_scale = None
+        self.settings_prediction_check = None
+        self.settings_media_row_check = None
+        self.settings_current_text_check = None
+        self.settings_fast_layout_check = None
+        self.settings_modifier_hints_check = None
+        self.settings_trigger_combo = None
+        self.settings_auto_cap_check = None
+        self.settings_auto_space_check = None
+        self.settings_sticky_lock_check = None
+        self.settings_dwell_check = None
+        self.settings_dwell_scale = None
+        self.settings_fade_check = None
+        self.settings_fade_delay_spin = None
+        self.settings_fade_opacity_scale = None
+        self.settings_start_minimized_check = None
+
+    def on_settings_theme_changed(self, widget):
+        if self._syncing_settings_dialog:
+            return
+        selected = widget.get_active_id()
+        if selected is not None:
+            self.set_theme_by_label(selected)
+
+    def on_settings_accent_changed(self, widget):
+        if self._syncing_settings_dialog:
+            return
+        accent_hex = widget.get_active_id()
+        if accent_hex is not None:
+            self.set_accent_color(accent_hex)
+
+    def on_settings_opacity_changed(self, widget):
+        if self._syncing_settings_dialog:
+            return
+        val = max(0.30, min(1.0, round(widget.get_value() / 100.0, 2)))
+        self.opacity = f"{val:.2f}"
+        if hasattr(self, "opacity_btn") and self.opacity_btn is not None:
+            self.opacity_btn.set_label(self.opacity)
+        self.apply_css()
+        self.save_settings()
+
+    def on_settings_font_scale_changed(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_font_scale(widget.get_value() / 100.0)
+
+    def on_settings_radius_changed(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_key_corner_radius(widget.get_value())
+
+    def on_settings_spacing_changed(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_key_spacing(widget.get_value())
+
+    def on_settings_media_row_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_show_media_row(widget.get_active())
+
+    def on_settings_current_text_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_show_current_text_bar(widget.get_active())
+
+    def on_settings_fast_layout_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_show_fast_layout_bar(widget.get_active())
+
+    def on_settings_modifier_hints_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_show_modifier_hints(widget.get_active())
+
+    def on_settings_trigger_changed(self, widget):
+        if not self._syncing_settings_dialog:
+            mode = widget.get_active_id()
+            if mode is not None:
+                self.set_input_trigger_mode(mode)
+
+    def on_settings_auto_cap_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_auto_capitalize(widget.get_active())
+
+    def on_settings_auto_space_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_auto_space_after_suggestion(widget.get_active())
+
+    def on_settings_sticky_lock_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_sticky_modifier_lock(widget.get_active())
+
+    def on_settings_dwell_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_dwell_enabled(widget.get_active())
+
+    def on_settings_dwell_time_changed(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_dwell_time_ms(widget.get_value())
+
+    def on_settings_fade_toggled(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_fade_on_inactivity(widget.get_active())
+
+    def on_settings_fade_delay_changed(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_inactivity_delay_seconds(widget.get_value())
+
+    def on_settings_fade_opacity_changed(self, widget):
+        if not self._syncing_settings_dialog:
+            self.set_inactivity_fade_opacity(widget.get_value() / 100.0)
 
     def on_settings_prediction_toggled(self, widget):
         if not self._syncing_settings_dialog:
@@ -2097,41 +3040,92 @@ class VirtualKeyboard(Gtk.Window):
         self.update_suggestion_bar_scale()
 
     def update_suggestion_bar_scale(self):
-        if not self.text_prediction_enabled:
-            return False
-
+        grid_width = self.grid.get_allocated_width() if hasattr(self, "grid") else 0
         grid_height = self.grid.get_allocated_height() if hasattr(self, "grid") else 0
-        if grid_height <= 0:
-            return False
+        win_width, win_height = self.get_size()
+        if grid_width <= 1:
+            grid_width = max(1, (win_width or self.width or self.BASE_GRID_WIDTH) - 6)
+        if grid_height <= 1:
+            est_h = win_height or self.height or (5 * self.BASE_KEY_HEIGHT + 80)
+            grid_height = max(1, est_h - 80)
 
-        row_height = grid_height / max(1, len(self.get_active_key_rows()))
-        scale = row_height / self.BASE_KEY_HEIGHT
-        suggestion_height = max(24, int(round(self.BASE_SUGGESTION_HEIGHT * scale)))
-        suggestion_font_size = max(10, int(round(self.BASE_SUGGESTION_FONT_SIZE * scale)))
-        spacing = max(1, int(round(self.BASE_SUGGESTION_SPACING * scale)))
-        margin = max(1, int(round(self.BASE_SUGGESTION_MARGIN * scale)))
-        margin_bottom = max(0, int(round(self.BASE_SUGGESTION_MARGIN_BOTTOM * scale)))
+        num_rows = max(1, len(self.get_active_key_rows()))
+        base_grid_height = num_rows * self.BASE_KEY_HEIGHT
+        height_scale = grid_height / max(1, base_grid_height)
+        width_scale = grid_width / max(1, self.BASE_GRID_WIDTH)
+        base_scale = max(0.55, min(2.2, min(width_scale, height_scale)))
+        effective_scale = base_scale * self.font_scale
+
+        key_font_size = max(
+            8,
+            min(42, int(round(self.BASE_KEY_FONT_SIZE * effective_scale))),
+        )
+        secondary_key_font_size = max(
+            7,
+            min(26, int(round(key_font_size * 0.74))),
+        )
+        header_font_size = max(
+            9,
+            min(18, int(round(self.BASE_HEADER_FONT_SIZE * min(1.25, effective_scale)))),
+        )
+        suggestion_height = max(
+            20,
+            min(56, int(round(self.BASE_SUGGESTION_HEIGHT * base_scale))),
+        )
+        suggestion_font_size = max(
+            9,
+            min(28, int(round(self.BASE_SUGGESTION_FONT_SIZE * effective_scale))),
+        )
+        spacing = max(1, int(round(self.BASE_SUGGESTION_SPACING * base_scale)))
+        margin = max(1, int(round(self.BASE_SUGGESTION_MARGIN * base_scale)))
+        margin_bottom = max(
+            0, int(round(self.BASE_SUGGESTION_MARGIN_BOTTOM * base_scale))
+        )
+
+        menu_open = (
+            hasattr(self, "color_combobox")
+            and self.color_combobox is not None
+            and self.color_combobox.get_visible()
+        )
+        min_title_w = 720 if menu_open else 460
+        show_title = (win_width or grid_width) >= min_title_w
+        quantized_scale = round(effective_scale, 2)
+
         scale_values = (
+            key_font_size,
+            secondary_key_font_size,
+            header_font_size,
             suggestion_height,
             suggestion_font_size,
             spacing,
             margin,
             margin_bottom,
+            quantized_scale,
+            show_title,
+            self.text_prediction_enabled,
         )
 
         if scale_values == self._last_suggestion_scale:
             return False
 
         self._last_suggestion_scale = scale_values
+        self.key_font_size = key_font_size
+        self.secondary_key_font_size = secondary_key_font_size
+        self.header_font_size = header_font_size
         self.suggestion_font_size = suggestion_font_size
-        self.suggestion_bar.set_spacing(spacing)
-        self.suggestion_bar.set_margin_start(margin)
-        self.suggestion_bar.set_margin_end(margin)
-        self.suggestion_bar.set_margin_top(margin)
-        self.suggestion_bar.set_margin_bottom(margin_bottom)
+        self.layout_scale = quantized_scale
 
-        for button in self.suggestion_buttons:
-            button.set_size_request(-1, suggestion_height)
+        if hasattr(self, "header") and self.header is not None:
+            self.header.set_title(APP_DISPLAY_NAME if show_title else "")
+
+        if hasattr(self, "suggestion_bar") and self.suggestion_bar is not None:
+            self.suggestion_bar.set_spacing(spacing)
+            self.suggestion_bar.set_margin_start(margin)
+            self.suggestion_bar.set_margin_end(margin)
+            self.suggestion_bar.set_margin_top(margin)
+            self.suggestion_bar.set_margin_bottom(margin_bottom)
+            for button in self.suggestion_buttons:
+                button.set_size_request(-1, suggestion_height)
 
         self.apply_css()
         return False
@@ -2190,31 +3184,13 @@ class VirtualKeyboard(Gtk.Window):
             if button.get_label() != "☰":
                 button.set_visible(not button.get_visible())
         self.color_combobox.set_visible(not self.color_combobox.get_visible())
+        self._last_suggestion_scale = None
+        self.update_suggestion_bar_scale()
 
     def change_color(self, widget):
         selected_label = self.color_combobox.get_active_text()
-        selected_color = self.color_map.get(selected_label)
-        if selected_color is not None:
-            if selected_color == ONBOARD_BACKGROUND_PRESET:
-                self.style_variant = "onboard"
-            elif selected_color == HIGH_CONTRAST_TV_BACKGROUND_PRESET:
-                self.style_variant = "high_contrast_tv"
-            elif (
-                isinstance(selected_color, tuple)
-                and len(selected_color) == 2
-                and selected_color[0] == ENHANCED_BACKGROUND_PRESET
-            ):
-                self.style_variant = "enhanced"
-                self.bg_color = selected_color[1]
-            else:
-                self.style_variant = "classic"
-                self.bg_color = selected_color
-
-        if self.bg_color in LIGHT_BACKGROUND_COLORS:
-            self.text_color = "#1C1C1C"
-        else:
-            self.text_color = "white"
-        self.apply_css()
+        if selected_label and selected_label in self.color_map:
+            self.set_theme_by_label(selected_label, save=False)
 
     @staticmethod
     def _parse_opacity(value, default=0.90):
@@ -2233,915 +3209,23 @@ class VirtualKeyboard(Gtk.Window):
         self.opacity = f"{updated:.2f}"
         self.opacity_btn.set_label(self.opacity)
         self.apply_css()
+        self.sync_settings_dialog_controls()
 
     def apply_css(self):
-        gnome_specific = ""
-        if "GNOME" in DESKTOP_ENV:
-            gnome_specific = "background-image: none;"
-        theme_opacity = self._parse_opacity(self.opacity)
-        command_modifier_rgb = (
-            (0, 0, 0)
-            if self.style_variant == "classic" and self.bg_color == "255,0,0"
-            else (194, 40, 40)
+        css = build_theme_css(
+            style_variant=self.style_variant,
+            bg_color=self.bg_color,
+            text_color=self.text_color,
+            theme_opacity=self._parse_opacity(self.opacity),
+            desktop_env=DESKTOP_ENV,
+            accent_hex=self.accent_color,
+            key_font_size=self.key_font_size,
+            secondary_key_font_size=self.secondary_key_font_size,
+            header_font_size=self.header_font_size,
+            suggestion_font_size=self.suggestion_font_size,
+            key_radius=self.key_corner_radius,
+            key_spacing=self.key_spacing,
         )
-
-        def rgba(rgb_values, alpha_scale=1.0):
-            red, green, blue = rgb_values
-            alpha = max(0.0, min(1.0, theme_opacity * alpha_scale))
-            return f"rgba({red}, {green}, {blue}, {alpha:.3f})"
-
-        def parse_rgb_value(value):
-            try:
-                parts = [int(component.strip()) for component in value.split(",")]
-                if len(parts) == 3:
-                    return tuple(max(0, min(255, component)) for component in parts)
-            except (AttributeError, ValueError):
-                pass
-            return (0, 0, 0)
-
-        def adjust_rgb(rgb_values, amount):
-            return tuple(max(0, min(255, component + amount)) for component in rgb_values)
-
-        def rgb_css(rgb_values):
-            return f"{rgb_values[0]}, {rgb_values[1]}, {rgb_values[2]}"
-
-        def luminance(rgb_values):
-            red, green, blue = rgb_values
-            return 0.299 * red + 0.587 * green + 0.114 * blue
-
-        def contrast_text_rgb(rgb_values):
-            return (28, 28, 28) if luminance(rgb_values) >= 128 else (255, 255, 255)
-
-        def accent_color(rgb_values):
-            red, green, blue = rgb_values
-            maximum = max(rgb_values)
-            minimum = min(rgb_values)
-            if maximum == 0 or (maximum - minimum) / maximum < 0.25:
-                return "#000000" if luminance(rgb_values) >= 128 else "#FFFFFF"
-
-            color_range = maximum - minimum
-            if maximum == red:
-                hue = ((green - blue) / color_range) % 6
-            elif maximum == green:
-                hue = (blue - red) / color_range + 2
-            else:
-                hue = (red - green) / color_range + 4
-            hue /= 6.0
-
-            sector = int(hue * 6)
-            fraction = hue * 6 - sector
-            palette = (
-                (1, fraction, 0),
-                (1 - fraction, 1, 0),
-                (0, 1, fraction),
-                (0, 1 - fraction, 1),
-                (fraction, 0, 1),
-                (1, 0, 1 - fraction),
-            )
-            accent_rgb = palette[sector % 6]
-            return "#{:02X}{:02X}{:02X}".format(
-                int(accent_rgb[0] * 255),
-                int(accent_rgb[1] * 255),
-                int(accent_rgb[2] * 255),
-            )
-
-        if self.style_variant == "onboard":
-            css = f"""
-            #vboard-main {{
-                background-color: {rgba((18, 24, 33), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((28, 35, 46), 1.0)},
-                    {rgba((18, 24, 33), 1.0)}
-                );
-                border: 1px solid {rgba((7, 11, 18), 0.95)};
-                border-radius: 16px;
-                color: {rgba((239, 243, 250), 1.0)};
-            }}
-
-            #vboard-main headerbar {{
-                background-color: {rgba((31, 39, 53), 0.96)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((52, 61, 78), 0.96)},
-                    {rgba((31, 39, 53), 0.96)}
-                );
-                border: 0px;
-                border-bottom: 1px solid {rgba((8, 12, 19), 0.9)};
-                box-shadow: none;
-                padding: 4px 6px;
-            }}
-
-            #vboard-main headerbar button {{
-                min-width: 40px;
-                min-height: 34px;
-                padding: 0px 8px;
-                border: 1px solid {rgba((13, 21, 33), 1.0)};
-                border-radius: 8px;
-                margin: 0px 2px;
-                color: {rgba((239, 243, 250), 1.0)};
-                background-color: {rgba((38, 49, 66), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((69, 80, 101), 1.0)},
-                    {rgba((40, 50, 68), 1.0)}
-                );
-                box-shadow: inset 0 1px {rgba((255, 255, 255), 0.08)};
-                {gnome_specific};
-            }}
-
-            #vboard-main headerbar .titlebutton {{
-                min-width: 50px;
-                min-height: 40px;
-            }}
-
-            #vboard-main headerbar button:hover,
-            #vboard-main #combobox button.combo:hover {{
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((81, 94, 118), 1.0)},
-                    {rgba((49, 59, 79), 1.0)}
-                );
-            }}
-
-            #vboard-main headerbar button:active,
-            #vboard-main #combobox button.combo:active {{
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((41, 51, 68), 1.0)},
-                    {rgba((75, 87, 112), 1.0)}
-                );
-            }}
-
-            #vboard-main headerbar button label {{
-                color: {rgba((239, 243, 250), 1.0)};
-            }}
-
-            #vboard-main headerbar .title {{
-                color: {rgba((239, 243, 250), 0.72)};
-                font-weight: 600;
-            }}
-
-            #vboard-main #headbar-button,
-            #vboard-main #combobox button.combo {{
-                background-color: {rgba((38, 49, 66), 1.0)};
-            }}
-
-            #vboard-main #grid button label {{
-                color: {rgba((244, 247, 251), 1.0)};
-                font-size: 19px;
-                font-weight: 500;
-            }}
-
-            #vboard-main #grid button.compact-label label {{
-                font-size: 15px;
-            }}
-
-            #vboard-main #grid button {{
-                min-width: 10px;
-                min-height: 52px;
-                border: 1px solid {rgba((12, 20, 32), 1.0)};
-                border-radius: 8px;
-                background-color: {rgba((48, 58, 76), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((75, 86, 109), 1.0)},
-                    {rgba((42, 51, 69), 1.0)}
-                );
-                padding: 1px;
-                margin: 1px;
-                box-shadow:
-                    inset 0 1px {rgba((255, 255, 255), 0.09)},
-                    inset 0 -1px {rgba((0, 0, 0), 0.18)},
-                    0 1px 2px {rgba((0, 0, 0), 0.25)};
-            }}
-
-            #vboard-main #grid button.sidebar-key {{
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((60, 72, 95), 1.0)},
-                    {rgba((33, 42, 59), 1.0)}
-                );
-            }}
-
-            #vboard-main #grid button.sidebar-key.active-layer {{
-                border: 1px solid {rgba((102, 165, 232), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((53, 114, 184), 1.0)},
-                    {rgba((33, 81, 140), 1.0)}
-                );
-            }}
-
-            #vboard-main button {{
-                color: {rgba((239, 243, 250), 1.0)};
-            }}
-
-            #vboard-main #grid button:hover {{
-                border: 1px solid {rgba((110, 126, 151), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((86, 98, 123), 1.0)},
-                    {rgba((50, 60, 81), 1.0)}
-                );
-            }}
-
-            #vboard-main #grid button:active,
-            #vboard-main #grid button:active:hover {{
-                border: 1px solid {rgba((141, 164, 196), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((39, 48, 63), 1.0)},
-                    {rgba((70, 81, 106), 1.0)}
-                );
-            }}
-
-            #vboard-main #grid button.active-modifier {{
-                border: 1px solid {rgba((138, 163, 200), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((96, 112, 141), 1.0)},
-                    {rgba((55, 69, 90), 1.0)}
-                );
-                {gnome_specific};
-            }}
-
-            #vboard-main #grid button.active-command-modifier {{
-                border: 1px solid {rgba(command_modifier_rgb, 1.0)};
-                color: {rgba((247, 248, 251), 1.0)};
-                background-color: {rgba(command_modifier_rgb, 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba(command_modifier_rgb, 0.92)},
-                    {rgba(command_modifier_rgb, 0.72)}
-                );
-                {gnome_specific};
-            }}
-
-            #vboard-main #grid button.active-command-modifier label {{
-                color: {rgba((247, 248, 251), 1.0)};
-            }}
-
-            #vboard-main #esc-button,
-            #vboard-main #layout-button {{
-                min-width: 54px;
-                min-height: 34px;
-                border: 1px solid {rgba((17, 24, 36), 1.0)};
-                border-radius: 8px;
-                color: {rgba((247, 248, 251), 1.0)};
-                background-color: {rgba((51, 64, 89), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((86, 98, 123), 1.0)},
-                    {rgba((48, 58, 78), 1.0)}
-                );
-                box-shadow: inset 0 1px {rgba((255, 255, 255), 0.1)};
-                transition: none;
-            }}
-
-            #vboard-main #layout-button label {{
-                font-weight: 700;
-            }}
-
-            #vboard-main #esc-button:hover,
-            #vboard-main #layout-button:hover {{
-                border: 1px solid {rgba((142, 166, 199), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((97, 112, 139), 1.0)},
-                    {rgba((54, 65, 86), 1.0)}
-                );
-            }}
-
-            #vboard-main #layout-button.active-layout {{
-                border: 1px solid {rgba((102, 165, 232), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((53, 114, 184), 1.0)},
-                    {rgba((33, 81, 140), 1.0)}
-                );
-            }}
-
-            #vboard-main tooltip {{
-                color: white;
-                padding: 5px;
-            }}
-
-            #vboard-main #combobox button.combo {{
-                color: {rgba((239, 243, 250), 1.0)};
-                padding: 5px;
-                border: 1px solid {rgba((13, 21, 33), 1.0)};
-                border-radius: 8px;
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((69, 80, 101), 1.0)},
-                    {rgba((40, 50, 68), 1.0)}
-                );
-            }}
-
-            #vboard-main #suggestion-bar {{
-                background-color: transparent;
-            }}
-
-            #vboard-main #suggestion-button {{
-                border: 1px solid {rgba((17, 25, 37), 1.0)};
-                border-radius: 8px;
-                background-color: {rgba((32, 41, 56), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((51, 64, 85), 1.0)},
-                    {rgba((32, 41, 56), 1.0)}
-                );
-                min-height: 0px;
-                padding: 2px 8px;
-                box-shadow: inset 0 1px {rgba((255, 255, 255), 0.06)};
-            }}
-
-            #vboard-main #suggestion-button label,
-            #vboard-main #suggestion-button:disabled label {{
-                color: {rgba((216, 223, 234), 1.0)};
-                font-size: {self.suggestion_font_size}px;
-            }}
-
-            #vboard-main #suggestion-button.has-suggestion {{
-                border: 1px solid {rgba((37, 49, 68), 1.0)};
-            }}
-
-            #vboard-main #suggestion-button.has-suggestion:hover {{
-                border: 1px solid {rgba((115, 130, 154), 1.0)};
-                background-image: linear-gradient(
-                    to bottom,
-                    {rgba((59, 73, 96), 1.0)},
-                    {rgba((38, 49, 68), 1.0)}
-                );
-            }}
-            """
-        elif self.style_variant == "high_contrast_tv":
-            # Modeled on Onboard's Charcoal High Contrast TV theme:
-            # flat keys, zero drop shadows, bold Liberation Sans labels, crisp borders.
-            css = f"""
-            #vboard-main {{
-                background-color: {rgba((22, 22, 22), 1.0)};
-                background-image: none;
-                border: 2px solid {rgba((110, 110, 110), 1.0)};
-                border-radius: 12px;
-                color: #FFFFFF;
-                font-family: "Liberation Sans", sans-serif;
-            }}
-
-            #vboard-main headerbar {{
-                background-color: {rgba((30, 30, 30), 1.0)};
-                background-image: none;
-                border: 0px;
-                border-bottom: 2px solid {rgba((88, 88, 88), 1.0)};
-                box-shadow: none;
-                padding: 4px 6px;
-            }}
-
-            #vboard-main headerbar button {{
-                min-width: 42px;
-                min-height: 36px;
-                padding: 0px 8px;
-                border: 2px solid {rgba((150, 150, 150), 1.0)};
-                border-radius: 9px;
-                margin: 0px 2px;
-                color: #FFFFFF;
-                background-color: {rgba((48, 48, 48), 1.0)};
-                background-image: none;
-                box-shadow: none;
-                transition: none;
-            }}
-
-            #vboard-main headerbar .titlebutton {{
-                min-width: 44px;
-                min-height: 36px;
-            }}
-
-            #vboard-main headerbar button:hover,
-            #vboard-main #combobox button.combo:hover {{
-                border: 2px solid #FFD600;
-                background-color: {rgba((72, 72, 72), 1.0)};
-                background-image: none;
-            }}
-
-            #vboard-main headerbar button:active,
-            #vboard-main #combobox button.combo:active {{
-                border: 2px solid #FFD600;
-                background-color: #FFD600;
-                background-image: none;
-            }}
-
-            #vboard-main headerbar button:active label {{
-                color: #111111;
-            }}
-
-            #vboard-main headerbar button label {{
-                color: #FFFFFF;
-                font-family: "Liberation Sans", sans-serif;
-                font-weight: 700;
-            }}
-
-            #vboard-main headerbar .title {{
-                color: #E6E6E6;
-                font-family: "Liberation Sans", sans-serif;
-                font-weight: 700;
-            }}
-
-            #vboard-main #headbar-button,
-            #vboard-main #combobox button.combo {{
-                background-color: {rgba((48, 48, 48), 1.0)};
-                background-image: none;
-                box-shadow: none;
-            }}
-
-            #vboard-main #grid button label {{
-                color: #FFFFFF;
-                font-family: "Liberation Sans", sans-serif;
-                font-size: 21px;
-                font-weight: 700;
-            }}
-
-            #vboard-main #grid button.compact-label label {{
-                font-size: 15px;
-            }}
-
-            #vboard-main #grid button {{
-                min-width: 10px;
-                min-height: 54px;
-                border: 2px solid {rgba((160, 160, 160), 1.0)};
-                border-radius: 10px;
-                background-color: {rgba((46, 46, 46), 1.0)};
-                background-image: none;
-                padding: 1px;
-                margin: 2px;
-                box-shadow: none;
-                transition: none;
-            }}
-
-            #vboard-main #grid button.sidebar-key {{
-                background-color: {rgba((34, 38, 44), 1.0)};
-                border: 2px solid {rgba((138, 152, 168), 1.0)};
-            }}
-
-            #vboard-main #grid button.sidebar-key.active-layer {{
-                border: 2px solid #FFFFFF;
-                background-color: {rgba((0, 118, 196), 1.0)};
-            }}
-
-            #vboard-main button {{
-                color: #FFFFFF;
-            }}
-
-            #vboard-main #grid button:hover {{
-                border: 2px solid #FFD600;
-                background-color: {rgba((74, 74, 74), 1.0)};
-                background-image: none;
-            }}
-
-            #vboard-main #grid button:active,
-            #vboard-main #grid button:active:hover {{
-                border: 2px solid #FFD600;
-                background-color: #FFD600;
-                background-image: none;
-            }}
-
-            #vboard-main #grid button:active label,
-            #vboard-main #grid button:active:hover label {{
-                color: #111111;
-            }}
-
-            #vboard-main #grid button.active-modifier {{
-                border: 2px solid #FFD600;
-                background-color: {rgba((0, 118, 196), 1.0)};
-                background-image: none;
-            }}
-
-            #vboard-main #grid button.active-command-modifier {{
-                border: 2px solid #FFFFFF;
-                color: #FFFFFF;
-                background-color: {rgba((204, 38, 38), 1.0)};
-                background-image: none;
-            }}
-
-            #vboard-main #grid button.active-command-modifier label {{
-                color: #FFFFFF;
-            }}
-
-            #vboard-main #esc-button,
-            #vboard-main #layout-button {{
-                min-width: 56px;
-                min-height: 36px;
-                border: 2px solid {rgba((185, 185, 185), 1.0)};
-                border-radius: 9px;
-                color: #FFFFFF;
-                background-color: {rgba((56, 56, 56), 1.0)};
-                background-image: none;
-                box-shadow: none;
-                transition: none;
-            }}
-
-            #vboard-main #esc-button:hover,
-            #vboard-main #layout-button:hover {{
-                border: 2px solid #FFD600;
-                background-color: {rgba((82, 82, 82), 1.0)};
-            }}
-
-            #vboard-main #layout-button.active-layout {{
-                border: 2px solid #FFFFFF;
-                background-color: {rgba((0, 118, 196), 1.0)};
-            }}
-
-            #vboard-main tooltip {{
-                color: #FFFFFF;
-                padding: 5px;
-            }}
-
-            #vboard-main #combobox button.combo {{
-                color: #FFFFFF;
-                padding: 5px;
-                border: 2px solid {rgba((150, 150, 150), 1.0)};
-                border-radius: 9px;
-                background-color: {rgba((48, 48, 48), 1.0)};
-                background-image: none;
-            }}
-
-            #vboard-main #suggestion-bar {{
-                background-color: transparent;
-            }}
-
-            #vboard-main #suggestion-button {{
-                border: 2px solid {rgba((110, 110, 110), 1.0)};
-                border-radius: 9px;
-                background-color: {rgba((36, 36, 36), 1.0)};
-                background-image: none;
-                box-shadow: none;
-                transition: none;
-                min-height: 0px;
-                padding: 2px 8px;
-            }}
-
-            #vboard-main #suggestion-button label,
-            #vboard-main #suggestion-button:disabled label {{
-                color: #FFFFFF;
-                font-family: "Liberation Sans", sans-serif;
-                font-size: {self.suggestion_font_size}px;
-                font-weight: 700;
-            }}
-
-            #vboard-main #suggestion-button.has-suggestion {{
-                border: 2px solid {rgba((185, 185, 185), 1.0)};
-            }}
-
-            #vboard-main #suggestion-button.has-suggestion:hover {{
-                border: 2px solid #FFD600;
-                background-color: {rgba((68, 68, 68), 1.0)};
-            }}
-            """
-        elif self.style_variant == "enhanced":
-            base_rgb = parse_rgb_value(self.bg_color)
-            window_rgb = adjust_rgb(base_rgb, -40)
-            header_rgb = adjust_rgb(base_rgb, -18)
-            key_rgb = adjust_rgb(base_rgb, 30)
-            hover_rgb = adjust_rgb(base_rgb, 48)
-            pressed_rgb = adjust_rgb(base_rgb, 78)
-            suggestion_rgb = adjust_rgb(base_rgb, 18)
-            text_rgb = contrast_text_rgb(key_rgb)
-            accent = accent_color(base_rgb)
-            css = f"""
-            #vboard-main {{
-                background-color: {rgba(window_rgb, 1.0)};
-                color: rgb({rgb_css(text_rgb)});
-            }}
-
-            #vboard-main headerbar {{
-                background-color: {rgba(header_rgb, 1.0)};
-                border: 0px;
-                box-shadow: none;
-                padding: 4px 6px;
-            }}
-
-            #vboard-main headerbar button {{
-                min-width: 40px;
-                min-height: 34px;
-                padding: 0px;
-                border: 1px solid transparent;
-                border-radius: 6px;
-                margin: 0px 2px;
-                color: rgb({rgb_css(text_rgb)});
-                background-color: transparent;
-                background-image: none;
-                {gnome_specific};
-            }}
-
-            #vboard-main headerbar .titlebutton {{
-                min-width: 50px;
-                min-height: 40px;
-            }}
-
-            #vboard-main headerbar button:hover,
-            #vboard-main #combobox button.combo:hover {{
-                border: 1px solid {accent};
-                background-color: {rgba(key_rgb, 0.85)};
-                background-image: none;
-            }}
-
-            #vboard-main headerbar button:active,
-            #vboard-main #combobox button.combo:active {{
-                border: 1px solid rgb({rgb_css(text_rgb)});
-                background-color: {rgba(pressed_rgb, 1.0)};
-                background-image: none;
-            }}
-
-            #vboard-main headerbar button label,
-            #vboard-main headerbar .title {{
-                color: rgb({rgb_css(text_rgb)});
-            }}
-
-            #vboard-main #headbar-button,
-            #vboard-main #combobox button.combo {{
-                background-image: none;
-            }}
-
-            #vboard-main #grid button label {{
-                color: rgb({rgb_css(text_rgb)});
-                font-size: 19px;
-                font-weight: 500;
-            }}
-
-            #vboard-main #grid button {{
-                min-width: 10px;
-                min-height: 52px;
-                border: 1px solid transparent;
-                border-radius: 7px;
-                background-color: {rgba(key_rgb, 1.0)};
-                background-image: none;
-                padding: 1px;
-                margin: 2px;
-                {gnome_specific};
-            }}
-
-            #vboard-main #grid button.sidebar-key {{
-                background-color: {rgba(header_rgb, 1.0)};
-            }}
-
-            #vboard-main #grid button.active-layer {{
-                border: 1px solid {accent};
-                background-color: {rgba(pressed_rgb, 1.0)};
-            }}
-
-            #vboard-main button {{
-                background-color: transparent;
-                color: rgb({rgb_css(text_rgb)});
-            }}
-
-            #vboard-main #grid button:hover {{
-                border: 1px solid {accent};
-                background-color: {rgba(hover_rgb, 1.0)};
-            }}
-
-            #vboard-main #grid button:active,
-            #vboard-main #grid button:active:hover {{
-                border: 1px solid rgb({rgb_css(text_rgb)});
-                background-color: {rgba(pressed_rgb, 1.0)};
-            }}
-
-            #vboard-main #grid button.active-modifier {{
-                border: 1px solid {accent};
-                background-color: {rgba(pressed_rgb, 1.0)};
-                {gnome_specific};
-            }}
-
-            #vboard-main #grid button.active-command-modifier {{
-                border: 1px solid {rgba(command_modifier_rgb, 1.0)};
-                color: white;
-                background-color: {rgba(command_modifier_rgb, 1.0)};
-                background-image: none;
-                {gnome_specific};
-            }}
-
-            #vboard-main #grid button.active-command-modifier label {{
-                color: white;
-            }}
-
-            #vboard-main #esc-button,
-            #vboard-main #layout-button {{
-                min-width: 54px;
-                min-height: 34px;
-                border: 1px solid transparent;
-                border-radius: 6px;
-                color: rgb({rgb_css(text_rgb)});
-                background-color: {rgba(key_rgb, 1.0)};
-                background-image: none;
-                transition: none;
-            }}
-
-            #vboard-main #layout-button label {{
-                font-weight: 700;
-            }}
-
-            #vboard-main #esc-button:hover,
-            #vboard-main #layout-button:hover {{
-                border: 1px solid {accent};
-                background-color: {rgba(hover_rgb, 1.0)};
-            }}
-
-            #vboard-main #layout-button.active-layout {{
-                border: 1px solid {rgba(command_modifier_rgb, 1.0)};
-                color: white;
-                background-color: {rgba(command_modifier_rgb, 1.0)};
-                background-image: none;
-            }}
-
-            #vboard-main #layout-button.active-layout label {{
-                color: white;
-            }}
-
-            #vboard-main tooltip {{
-                color: white;
-                padding: 5px;
-            }}
-
-            #vboard-main #combobox button.combo {{
-                color: rgb({rgb_css(text_rgb)});
-                padding: 5px;
-                border: 1px solid transparent;
-                border-radius: 6px;
-                background-color: transparent;
-                background-image: none;
-            }}
-
-            #vboard-main #suggestion-bar {{
-                background-color: transparent;
-            }}
-
-            #vboard-main #suggestion-button {{
-                border: 1px solid transparent;
-                border-radius: 6px;
-                background-color: {rgba(suggestion_rgb, 1.0)};
-                background-image: none;
-                min-height: 0px;
-                padding: 2px 8px;
-            }}
-
-            #vboard-main #suggestion-button label,
-            #vboard-main #suggestion-button:disabled label {{
-                color: rgb({rgb_css(text_rgb)});
-                font-size: {self.suggestion_font_size}px;
-            }}
-
-            #vboard-main #suggestion-button.has-suggestion {{
-                border: 1px solid rgb({rgb_css(text_rgb)});
-            }}
-
-            #vboard-main #suggestion-button.has-suggestion:hover {{
-                border: 1px solid {accent};
-                background-color: {rgba(hover_rgb, 1.0)};
-            }}
-            """
-        else:
-            css = f"""
-            #vboard-main {{
-                background-color: rgba({self.bg_color}, {self.opacity});
-            }}
-
-            #vboard-main headerbar {{
-                background-color: rgba({self.bg_color}, {self.opacity});
-                border: 0px;
-                box-shadow: none;
-            }}
-
-            #vboard-main headerbar button {{
-                min-width: 40px;
-                padding: 0px;
-                border: 0px;
-                margin: 0px;
-                {gnome_specific}
-            }}
-
-            #vboard-main headerbar .titlebutton {{
-                min-width: 50px;
-                min-height: 40px;
-            }}
-
-            #vboard-main headerbar button label {{
-                color: {self.text_color};
-            }}
-
-            #vboard-main #headbar-button,
-            #vboard-main #combobox button.combo {{
-                background-image: none;
-            }}
-
-            #vboard-main #grid button label {{
-                color: {self.text_color};
-            }}
-
-            #vboard-main #grid button {{
-                min-width: 10px;
-                border: 1px solid {self.text_color};
-                background-image: none;
-                padding: 1px;
-                margin: 1px;
-            }}
-
-            #vboard-main #grid button.active-layer {{
-                border: 2px solid #00CACB;
-            }}
-
-            #vboard-main button {{
-                background-color: transparent;
-                color: {self.text_color};
-            }}
-
-            #vboard-main #grid button:hover {{
-                border: 1px solid #00CACB;
-            }}
-
-            #vboard-main #grid button.pressed,
-            #vboard-main #grid button.pressed:hover {{
-                border: 1px solid {self.text_color};
-            }}
-
-            #vboard-main #grid button.active-modifier {{
-                border: 1px solid #00CACB;
-                {gnome_specific}
-            }}
-
-            #vboard-main #grid button.active-command-modifier {{
-                border: 1px solid rgb{command_modifier_rgb};
-                color: white;
-                background-color: {rgba(command_modifier_rgb, 1.0)};
-                background-image: none;
-                {gnome_specific}
-            }}
-
-            #vboard-main #grid button.active-command-modifier label {{
-                color: white;
-            }}
-
-            #vboard-main #esc-button,
-            #vboard-main #layout-button {{
-                min-width: 54px;
-                border: 1px solid {self.text_color};
-                background-image: none;
-                transition: none;
-            }}
-
-            #vboard-main #layout-button label {{
-                font-weight: 700;
-            }}
-
-            #vboard-main #esc-button:hover,
-            #vboard-main #layout-button:hover {{
-                border: 1px solid #00CACB;
-            }}
-
-            #vboard-main #layout-button.active-layout {{
-                border: 1px solid rgb{command_modifier_rgb};
-                color: white;
-                background-color: {rgba(command_modifier_rgb, 1.0)};
-                background-image: none;
-            }}
-
-            #vboard-main #layout-button.active-layout label {{
-                color: white;
-            }}
-
-            #vboard-main tooltip {{
-                color: white;
-                padding: 5px;
-            }}
-
-            #vboard-main #combobox button.combo {{
-                color: {self.text_color};
-                padding: 5px;
-            }}
-
-            #vboard-main #suggestion-bar {{
-                background-color: transparent;
-            }}
-
-            #vboard-main #suggestion-button {{
-                border: 1px solid transparent;
-                background-image: none;
-                min-height: 0px;
-                padding: 2px 8px;
-            }}
-
-            #vboard-main #suggestion-button label,
-            #vboard-main #suggestion-button:disabled label {{
-                color: {self.text_color};
-                font-size: {self.suggestion_font_size}px;
-            }}
-
-            #vboard-main #suggestion-button.has-suggestion {{
-                border: 1px solid {self.text_color};
-            }}
-
-            #vboard-main #suggestion-button.has-suggestion:hover {{
-                border: 1px solid #00CACB;
-            }}
-            """
 
         try:
             self.css_provider.load_from_data(css.encode("utf-8"))
@@ -3177,27 +3261,39 @@ class VirtualKeyboard(Gtk.Window):
         button = Gtk.Button(label=label_text)
         button.set_can_focus(False)
         button.set_focus_on_click(False)
+        ctx = button.get_style_context()
         if width <= 2 and len(label_text) >= 4:
-            button.get_style_context().add_class("compact-label")
+            ctx.add_class("compact-label")
+        if key_event in MODIFIER_KEYS or key_event in {
+            "CapsLock",
+            "Tab",
+            "Backspace",
+            "Enter",
+            "Delete",
+            "Esc",
+        }:
+            ctx.add_class("modifier-key")
         button.add_events(
             Gdk.EventMask.BUTTON_PRESS_MASK
             | Gdk.EventMask.BUTTON_RELEASE_MASK
             | Gdk.EventMask.POINTER_MOTION_MASK
+            | Gdk.EventMask.ENTER_NOTIFY_MASK
             | Gdk.EventMask.LEAVE_NOTIFY_MASK
         )
         button.connect("button-press-event", self.on_key_button_press_event, key_event)
         button.connect("motion-notify-event", self.on_key_button_motion_event, key_event)
         button.connect("button-release-event", self.on_key_button_release_event, key_event)
+        button.connect("enter-notify-event", self.on_key_button_enter_notify_event, key_event)
         button.connect("leave-notify-event", self.on_key_button_leave_notify_event)
 
         if key_event in TV_ACTION_KEYS:
-            button.get_style_context().add_class("sidebar-key")
+            ctx.add_class("sidebar-key")
             tooltips = {
                 TV_ACTION_HIDE: "Hide keyboard",
                 TV_ACTION_LANG: "Switch keyboard layout (right-click to choose)",
                 TV_ACTION_LAYER_ALPHA: "Letters layer",
                 TV_ACTION_LAYER_NUMBERS: "Numbers, function keys, and navigation layer",
-                TV_ACTION_OPTIONS: "Open Vboard options",
+                TV_ACTION_OPTIONS: "Open Vboard customization options",
             }
             if key_event in tooltips:
                 button.set_tooltip_text(tooltips[key_event])
@@ -3289,21 +3385,46 @@ class VirtualKeyboard(Gtk.Window):
         for key_label, button in self.key_buttons.items():
             button.set_label(self.get_button_label(key_label))
 
-    def update_modifier(self, key_event, value):
-        self.modifiers[key_event] = value
+    def update_modifier(self, key_event, value, locked=False):
+        self.modifiers[key_event] = bool(value)
+        if not value:
+            self.locked_modifiers[key_event] = False
+        else:
+            self.locked_modifiers[key_event] = bool(locked)
         button = self.modifier_buttons.get(key_event)
-        if button is None:
-            return
-        style_context = button.get_style_context()
-        modifier_class = (
-            "active-command-modifier"
-            if key_event.startswith(("Shift", "Ctrl", "Alt"))
-            else "active-modifier"
-        )
-        style_context.remove_class("active-modifier")
-        style_context.remove_class("active-command-modifier")
-        if value:
-            style_context.add_class(modifier_class)
+        if button is not None:
+            style_context = button.get_style_context()
+            modifier_class = (
+                "active-command-modifier"
+                if key_event.startswith(("Shift", "Ctrl", "Alt"))
+                else "active-modifier"
+            )
+            style_context.remove_class("active-modifier")
+            style_context.remove_class("active-command-modifier")
+            style_context.remove_class("locked-modifier")
+            if value:
+                style_context.add_class(modifier_class)
+                if self.locked_modifiers[key_event]:
+                    style_context.add_class("locked-modifier")
+        if key_event == "Alt_R":
+            self.update_modifier_hints()
+
+    def toggle_modifier_key(self, key_event):
+        if self.sticky_modifier_lock:
+            if not self.modifiers[key_event]:
+                self.update_modifier(key_event, True, locked=False)
+            elif not self.locked_modifiers.get(key_event, False):
+                self.update_modifier(key_event, True, locked=True)
+            else:
+                self.update_modifier(key_event, False, locked=False)
+        else:
+            self.update_modifier(key_event, not self.modifiers[key_event], locked=False)
+
+        if self.modifiers["Shift_L"] and self.modifiers["Shift_R"]:
+            self.update_modifier("Shift_L", False)
+            self.update_modifier("Shift_R", False)
+
+        self.update_key_labels()
 
     def set_caps_lock_active(self, active, update_system=True):
         active = bool(active)
@@ -3359,7 +3480,10 @@ class VirtualKeyboard(Gtk.Window):
         if event.type in (Gdk.EventType._2BUTTON_PRESS, Gdk.EventType._3BUTTON_PRESS):
             return True
 
+        self.reset_inactivity_timer()
+        self.cancel_dwell_timer()
         self.stop_key_repeat()
+        self._pending_release_key = None
         self.clear_key_button_visual_states(except_button=widget)
         self.clear_suggestion_override(update=False)
 
@@ -3383,13 +3507,7 @@ class VirtualKeyboard(Gtk.Window):
             return False
 
         if key_event in self.modifiers:
-            self.update_modifier(key_event, not self.modifiers[key_event])
-
-            if self.modifiers["Shift_L"] and self.modifiers["Shift_R"]:
-                self.update_modifier("Shift_L", False)
-                self.update_modifier("Shift_R", False)
-
-            self.update_key_labels()
+            self.toggle_modifier_key(key_event)
             return False
 
         if self.gesture_controller is not None and self.gesture_controller.handle_key_press(
@@ -3397,6 +3515,10 @@ class VirtualKeyboard(Gtk.Window):
             event,
             key_event,
         ):
+            return False
+
+        if self.input_trigger_mode == INPUT_TRIGGER_RELEASE:
+            self._pending_release_key = (widget, key_event)
             return False
 
         self.emit_key(key_event)
@@ -3420,22 +3542,44 @@ class VirtualKeyboard(Gtk.Window):
         ):
             return False
 
+        if (
+            self._pending_release_key is not None
+            and self._pending_release_key[0] is widget
+        ):
+            _pending_widget, pending_key = self._pending_release_key
+            self._pending_release_key = None
+            self.emit_key(pending_key)
+            return False
+
         self.stop_key_repeat()
         return False
 
+    def on_key_button_enter_notify_event(self, widget, event, key_event):
+        self.reset_inactivity_timer()
+        if self.dwell_enabled:
+            self.start_dwell_timer(widget, key_event)
+        return False
+
     def on_key_button_leave_notify_event(self, widget, event):
+        if (
+            self._pending_release_key is not None
+            and self._pending_release_key[0] is widget
+        ):
+            self._pending_release_key = None
+        if self._dwell_target is not None and self._dwell_target[0] is widget:
+            self.cancel_dwell_timer()
         widget.unset_state_flags(Gtk.StateFlags.ACTIVE | Gtk.StateFlags.PRELIGHT)
         return False
 
     def on_window_button_release_event(self, widget, event):
-        self.stop_key_repeat()
+        self.stop_all_active_keys()
         if self.gesture_controller is not None:
             self.gesture_controller.cancel_gesture()
         self.schedule_key_button_visual_reset()
         return False
 
     def on_window_leave_notify_event(self, widget, event):
-        self.stop_key_repeat()
+        self.stop_all_active_keys()
         if self.gesture_controller is not None:
             self.gesture_controller.cancel_gesture()
         self.schedule_key_button_visual_reset()
@@ -3480,24 +3624,72 @@ class VirtualKeyboard(Gtk.Window):
         modifiers["Shift_L"] = True
         self.emit_key(key_event, modifiers)
 
+    def _update_text_preview_and_autocap(self, key_event, active_modifiers):
+        if key_event == "Backspace":
+            self.current_text_buffer = self.current_text_buffer[:-1]
+            self._auto_cap_armed = False
+            self.update_current_text_label()
+            return
+
+        if key_event == "Enter":
+            self.current_text_buffer = ""
+            self._auto_cap_armed = bool(self.auto_capitalize)
+            self.update_current_text_label()
+            return
+
+        if key_event == "Space":
+            ended_sentence = self.current_text_buffer.rstrip().endswith((".", "!", "?"))
+            self.current_text_buffer = (self.current_text_buffer + " ")[-120:]
+            if self.auto_capitalize and ended_sentence:
+                self._auto_cap_armed = True
+            self.update_current_text_label()
+            return
+
+        if self.has_active_command_modifier(
+            active_modifiers
+        ) and not self.is_altgr_character_key(key_event, active_modifiers):
+            return
+
+        typed_char = self.key_event_to_character(key_event, active_modifiers)
+        if typed_char:
+            self.current_text_buffer = (self.current_text_buffer + typed_char)[-120:]
+            self._auto_cap_armed = False
+            self.update_current_text_label()
+
     def emit_key(self, key_event, modifiers=None):
-        active_modifiers = self.modifiers if modifiers is None else modifiers
+        self.reset_inactivity_timer()
+        active_modifiers = dict(self.modifiers if modifiers is None else modifiers)
         if self.gesture_controller is not None:
             self.gesture_controller.note_non_gesture_key()
         self.track_current_word(key_event, active_modifiers)
+        self._update_text_preview_and_autocap(key_event, active_modifiers)
         self.backend.emit_key(key_event, active_modifiers)
         self.reset_modifiers()
+        if (
+            self.auto_capitalize
+            and self._auto_cap_armed
+            and not self.caps_lock_active
+            and not self.modifiers["Shift_L"]
+            and not self.modifiers["Shift_R"]
+        ):
+            self.update_modifier("Shift_L", True, locked=False)
+            self.update_key_labels()
+            self._auto_cap_armed = False
 
     def emit_text(self, text):
+        self.reset_inactivity_timer()
         for char in text:
             key_event, modifiers = self.character_to_key_event(char)
             if key_event is None:
                 continue
             self.backend.emit_key(key_event, modifiers)
+        if text:
+            self.current_text_buffer = (self.current_text_buffer + text)[-120:]
+            self.update_current_text_label()
 
     def reset_modifiers(self):
         for mod_key, active in self.modifiers.items():
-            if active:
+            if active and not self.locked_modifiers.get(mod_key, False):
                 self.update_modifier(mod_key, False)
         self.update_key_labels()
 
@@ -3657,6 +3849,7 @@ class VirtualKeyboard(Gtk.Window):
         return suggestion
 
     def on_suggestion_clicked(self, widget):
+        self.reset_inactivity_timer()
         suggestion = widget.get_label().strip()
         if not suggestion:
             return
@@ -3677,7 +3870,7 @@ class VirtualKeyboard(Gtk.Window):
             return
 
         for modifier in MODIFIER_KEYS:
-            if self.modifiers[modifier]:
+            if self.modifiers[modifier] and not self.locked_modifiers.get(modifier, False):
                 self.update_modifier(modifier, False)
 
         for char in completion:
@@ -3686,7 +3879,15 @@ class VirtualKeyboard(Gtk.Window):
                 continue
             self.backend.emit_key(key_event, modifiers)
 
-        self.current_word = suggestion
+        self.current_text_buffer = (self.current_text_buffer + completion)[-120:]
+        if self.auto_space_after_suggestion:
+            empty_mods = {modifier: False for modifier in MODIFIER_KEYS}
+            self.backend.emit_key("Space", empty_mods)
+            self.current_text_buffer = (self.current_text_buffer + " ")[-120:]
+            self.current_word = ""
+        else:
+            self.current_word = suggestion
+        self.update_current_text_label()
         self.update_suggestions()
 
     def character_to_key_event(self, char):
@@ -3734,6 +3935,53 @@ class VirtualKeyboard(Gtk.Window):
                 self.style_variant = self.config.get(
                     "DEFAULT", "style_variant", fallback="classic"
                 )
+                self.accent_color = self.config.get(
+                    "DEFAULT", "accent_color", fallback=DEFAULT_ACCENT_COLOR
+                )
+                try:
+                    self.font_scale = max(
+                        0.75,
+                        min(
+                            1.60,
+                            float(
+                                self.config.get(
+                                    "DEFAULT",
+                                    "font_scale",
+                                    fallback=str(DEFAULT_FONT_SCALE),
+                                )
+                            ),
+                        ),
+                    )
+                except ValueError:
+                    self.font_scale = DEFAULT_FONT_SCALE
+                try:
+                    self.key_corner_radius = max(
+                        0,
+                        min(
+                            16,
+                            self.config.getint(
+                                "DEFAULT",
+                                "key_corner_radius",
+                                fallback=DEFAULT_KEY_RADIUS,
+                            ),
+                        ),
+                    )
+                except ValueError:
+                    self.key_corner_radius = DEFAULT_KEY_RADIUS
+                try:
+                    self.key_spacing = max(
+                        1,
+                        min(
+                            8,
+                            self.config.getint(
+                                "DEFAULT",
+                                "key_spacing",
+                                fallback=DEFAULT_KEY_SPACING,
+                            ),
+                        ),
+                    )
+                except ValueError:
+                    self.key_spacing = DEFAULT_KEY_SPACING
                 self.gesture_enabled = self.config.getboolean(
                     "DEFAULT", "gesture_enabled", fallback=True
                 )
@@ -3747,6 +3995,93 @@ class VirtualKeyboard(Gtk.Window):
                     "text_prediction_enabled",
                     fallback=True,
                 )
+                self.show_media_row = self.config.getboolean(
+                    "DEFAULT",
+                    "show_media_row",
+                    fallback=False,
+                )
+                self.show_current_text_bar = self.config.getboolean(
+                    "DEFAULT",
+                    "show_current_text_bar",
+                    fallback=False,
+                )
+                self.show_fast_layout_bar = self.config.getboolean(
+                    "DEFAULT",
+                    "show_fast_layout_bar",
+                    fallback=True,
+                )
+                self.show_modifier_hints = self.config.getboolean(
+                    "DEFAULT",
+                    "show_modifier_hints",
+                    fallback=True,
+                )
+                raw_trigger = self.config.get(
+                    "DEFAULT", "input_trigger_mode", fallback=INPUT_TRIGGER_PRESS
+                )
+                self.input_trigger_mode = (
+                    raw_trigger
+                    if raw_trigger in (INPUT_TRIGGER_PRESS, INPUT_TRIGGER_RELEASE)
+                    else INPUT_TRIGGER_PRESS
+                )
+                self.auto_capitalize = self.config.getboolean(
+                    "DEFAULT", "auto_capitalize", fallback=False
+                )
+                self.auto_space_after_suggestion = self.config.getboolean(
+                    "DEFAULT", "auto_space_after_suggestion", fallback=False
+                )
+                self.sticky_modifier_lock = self.config.getboolean(
+                    "DEFAULT", "sticky_modifier_lock", fallback=True
+                )
+                self.fade_on_inactivity = self.config.getboolean(
+                    "DEFAULT", "fade_on_inactivity", fallback=False
+                )
+                try:
+                    self.inactivity_delay_seconds = max(
+                        3,
+                        min(
+                            120,
+                            self.config.getint(
+                                "DEFAULT",
+                                "inactivity_delay_seconds",
+                                fallback=DEFAULT_INACTIVITY_DELAY_SECONDS,
+                            ),
+                        ),
+                    )
+                except ValueError:
+                    self.inactivity_delay_seconds = DEFAULT_INACTIVITY_DELAY_SECONDS
+                try:
+                    self.inactivity_fade_opacity = max(
+                        0.10,
+                        min(
+                            0.85,
+                            float(
+                                self.config.get(
+                                    "DEFAULT",
+                                    "inactivity_fade_opacity",
+                                    fallback=str(DEFAULT_INACTIVITY_FADE_OPACITY),
+                                )
+                            ),
+                        ),
+                    )
+                except ValueError:
+                    self.inactivity_fade_opacity = DEFAULT_INACTIVITY_FADE_OPACITY
+                self.dwell_enabled = self.config.getboolean(
+                    "DEFAULT", "dwell_enabled", fallback=False
+                )
+                try:
+                    self.dwell_time_ms = max(
+                        300,
+                        min(
+                            2500,
+                            self.config.getint(
+                                "DEFAULT",
+                                "dwell_time_ms",
+                                fallback=DEFAULT_DWELL_TIME_MS,
+                            ),
+                        ),
+                    )
+                except ValueError:
+                    self.dwell_time_ms = DEFAULT_DWELL_TIME_MS
                 self.start_minimized = self.config.getboolean(
                     "DEFAULT",
                     "start_minimized",
@@ -3802,7 +4137,24 @@ class VirtualKeyboard(Gtk.Window):
             "opacity": self.opacity,
             "text_color": self.text_color,
             "style_variant": self.style_variant,
+            "accent_color": self.accent_color,
+            "font_scale": f"{self.font_scale:.2f}",
+            "key_corner_radius": str(self.key_corner_radius),
+            "key_spacing": str(self.key_spacing),
             "text_prediction_enabled": str(self.text_prediction_enabled),
+            "show_media_row": str(self.show_media_row),
+            "show_current_text_bar": str(self.show_current_text_bar),
+            "show_fast_layout_bar": str(self.show_fast_layout_bar),
+            "show_modifier_hints": str(self.show_modifier_hints),
+            "input_trigger_mode": self.input_trigger_mode,
+            "auto_capitalize": str(self.auto_capitalize),
+            "auto_space_after_suggestion": str(self.auto_space_after_suggestion),
+            "sticky_modifier_lock": str(self.sticky_modifier_lock),
+            "fade_on_inactivity": str(self.fade_on_inactivity),
+            "inactivity_delay_seconds": str(self.inactivity_delay_seconds),
+            "inactivity_fade_opacity": f"{self.inactivity_fade_opacity:.2f}",
+            "dwell_enabled": str(self.dwell_enabled),
+            "dwell_time_ms": str(self.dwell_time_ms),
             "start_minimized": str(self.start_minimized),
             "sync_system_layout": str(self.sync_system_layout),
             "keyboard_mode": self.keyboard_mode,
@@ -3811,8 +4163,8 @@ class VirtualKeyboard(Gtk.Window):
                 self.gesture_visual_feedback_enabled
             ),
             "keyboard_layout": saved_layout,
-            "width": self.width,
-            "height": self.height,
+            "width": str(self.width),
+            "height": str(self.height),
             "pos_x": str(self.pos_x),
             "pos_y": str(self.pos_y),
         }

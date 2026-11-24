@@ -37,8 +37,23 @@ class LayoutsTest(unittest.TestCase):
         self.layouts = load_keyboard_layouts(user_layout_dir="/nonexistent")
 
     def test_bundled_layouts_include_ukrainian_and_polish(self):
-        for layout_id in ("en", "uk", "pl", "ru", "de", "fr", "sv"):
+        for layout_id in ("en", "uk", "pl", "ru", "ar", "de", "fr", "sv"):
             self.assertIn(layout_id, self.layouts)
+
+    def test_arabic_layout_mapping(self):
+        ar = self.layouts["ar"]
+        self.assertEqual(ar["label"], "Arabic")
+        self.assertEqual(get_layout_short_label("ar", self.layouts), "AR")
+        self.assertEqual(ar["xkb_layout"], "ar")
+        self.assertEqual(ar["labels"]["Q"], "ض")
+        self.assertEqual(ar["labels"]["H"], "ا")
+        self.assertEqual(ar["labels"]["B"], "لا")
+        self.assertEqual(ar["labels"]["/"], "ظ")
+        self.assertEqual(ar["shifted"]["/"], "؟")
+        self.assertEqual(ar["shifted"]["G"], "لأ")
+        self.assertEqual(ar["shifted"]["B"], "لآ")
+        ar_tv_cells = build_compact_tv_alpha_cells(ar)
+        assert_exact_grid_tiling(self, ar_tv_cells, expected_cols=33, expected_rows=5)
 
     def test_ukrainian_jcuken_mapping(self):
         uk = self.layouts["uk"]
