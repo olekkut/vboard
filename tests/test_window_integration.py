@@ -165,6 +165,53 @@ class VirtualKeyboardIntegrationTest(unittest.TestCase):
         self.window.reset_modifiers()
         self.assertFalse(self.window.modifiers["Shift_R"])
 
+    def test_russian_layout_shift_altgr_and_gestures(self):
+        self.window.set_keyboard_layout("ru")
+        self.assertEqual(self.fake_backend.current_index, 3)
+        self.assertEqual(self.window.layout_button.get_label(), "RU")
+        self.assertEqual(self.window.key_buttons["`"].get_label(), "ё")
+        self.assertEqual(self.window.key_buttons["S"].get_label(), "ы")
+        self.assertEqual(self.window.key_buttons["]"].get_label(), "ъ")
+        self.assertEqual(self.window.key_buttons["'"].get_label(), "э")
+
+        # Shift updates Russian letters and shifted punctuation (including \ -> / and / -> ,)
+        self.window.update_modifier("Shift_L", True)
+        self.window.update_key_labels()
+        self.assertEqual(self.window.key_buttons["`"].get_label(), "Ё")
+        self.assertEqual(self.window.key_buttons["S"].get_label(), "Ы")
+        self.assertEqual(self.window.key_buttons["\\"].get_label(), "/")
+        self.assertEqual(self.window.key_buttons["/"].get_label(), ",")
+        self.window.reset_modifiers()
+
+        # AltGr shows the ruble sign on key 8
+        self.window.update_modifier("Alt_R", True)
+        self.window.update_key_labels()
+        self.assertEqual(self.window.key_buttons["8"].get_label(), "₽")
+        self.window.reset_modifiers()
+
+        # Character lookup resolves Cyrillic lowercase, uppercase, and ruble sign
+        key_event, mods = self.window.character_to_key_event("ё")
+        self.assertEqual((key_event, mods["Shift_L"], mods["Alt_R"]), ("`", False, False))
+        key_event, mods = self.window.character_to_key_event("Ы")
+        self.assertEqual((key_event, mods["Shift_L"], mods["Alt_R"]), ("S", True, False))
+        key_event, mods = self.window.character_to_key_event("₽")
+        self.assertEqual((key_event, mods["Shift_L"], mods["Alt_R"]), ("8", False, True))
+
+        # Gesture typing resolves Cyrillic punctuation-key letters
+        self.assertIsNotNone(self.window.gesture_controller)
+        self.assertEqual(
+            self.window.gesture_controller.key_event_to_active_gesture_char("["), "х"
+        )
+        self.assertEqual(
+            self.window.gesture_controller.key_event_to_active_gesture_char("]"), "ъ"
+        )
+        self.assertEqual(
+            self.window.gesture_controller.key_event_to_active_gesture_char(";"), "ж"
+        )
+        self.assertEqual(
+            self.window.gesture_controller.key_event_to_active_gesture_char("'"), "э"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

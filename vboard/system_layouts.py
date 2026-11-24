@@ -35,6 +35,17 @@ XKB_FALLBACK_TO_VBOARD_LAYOUT = {
     "us": "en",
 }
 
+# Default XKB variant names that are identical to the empty ("") variant in xkb-data.
+DEFAULT_XKB_VARIANT_ALIASES = {
+    ("de", "basic"): "",
+    ("fr", "basic"): "",
+    ("pl", "basic"): "",
+    ("ru", "winkeys"): "",
+    ("se", "basic"): "",
+    ("ua", "unicode"): "",
+    ("us", "basic"): "",
+}
+
 
 @dataclass(frozen=True)
 class SystemLayoutEntry:
@@ -61,6 +72,10 @@ def parse_xkb_spec(layout_name, variant=""):
     return layout_name, variant
 
 
+def normalize_xkb_variant(xkb_layout, variant=""):
+    return DEFAULT_XKB_VARIANT_ALIASES.get((xkb_layout, variant), variant)
+
+
 def build_xkb_lookup_maps(keyboard_layouts):
     vboard_to_xkb = dict(DEFAULT_VBOARD_TO_XKB_LAYOUT)
     exact_xkb_to_vboard = {}
@@ -72,6 +87,7 @@ def build_xkb_lookup_maps(keyboard_layouts):
         xkb_variant = layout_config.get("xkb_variant", "") or ""
         if xkb_layout:
             xkb_layout, xkb_variant = parse_xkb_spec(xkb_layout, xkb_variant)
+            xkb_variant = normalize_xkb_variant(xkb_layout, xkb_variant)
             vboard_to_xkb[layout_id] = xkb_layout
             exact_xkb_to_vboard[(xkb_layout, xkb_variant)] = layout_id
 
@@ -93,17 +109,18 @@ def resolve_system_entry_to_vboard_layout(entry, keyboard_layouts):
     xkb_layout, variant = parse_xkb_spec(entry.xkb_layout, entry.variant)
     if not xkb_layout:
         return None
+    canonical_variant = normalize_xkb_variant(xkb_layout, variant)
 
     _vboard_to_xkb, exact_xkb_to_vboard = build_xkb_lookup_maps(keyboard_layouts)
 
-    exact_match = exact_xkb_to_vboard.get((xkb_layout, variant))
+    exact_match = exact_xkb_to_vboard.get((xkb_layout, canonical_variant))
     if exact_match is not None:
         return exact_match
 
     # Dynamically extract exact labels from XKB for any variant or unbundled language.
     dynamic_layout = build_layout_from_xkb(
         xkb_layout,
-        variant,
+        canonical_variant,
         display_name=entry.display_name or None,
     )
     if dynamic_layout is not None:
@@ -111,7 +128,7 @@ def resolve_system_entry_to_vboard_layout(entry, keyboard_layouts):
         return dynamic_layout["id"]
 
     # Fallback when libxkbcommon is unavailable.
-    if not variant:
+    if not canonical_variant:
         fallback_id = XKB_FALLBACK_TO_VBOARD_LAYOUT.get(xkb_layout)
         if fallback_id in keyboard_layouts:
             return fallback_id
@@ -483,15 +500,18 @@ class SystemLayoutController:
         if not wanted_xkb:
             return None
         wanted_xkb, wanted_variant = parse_xkb_spec(wanted_xkb, wanted_variant)
+        wanted_canonical = normalize_xkb_variant(wanted_xkb, wanted_variant)
 
         entries = self.get_system_entries()
-        # 1. Exact match on (xkb_layout, variant)
+        # 1. Exact match on canonical (xkb_layout, variant)
         for entry in entries:
-            if entry.xkb_layout == wanted_xkb and entry.variant == wanted_variant:
+            entry_canonical = normalize_xkb_variant(entry.xkb_layout, entry.variant)
+            if entry.xkb_layout == wanted_xkb and entry_canonical == wanted_canonical:
                 return entry
-        # 2. If wanting default variant, prefer empty variant; otherwise match base layout
+        # 2. Prefer default variant if present; otherwise match base layout
         for entry in entries:
-            if entry.xkb_layout == wanted_xkb and not entry.variant:
+            entry_canonical = normalize_xkb_variant(entry.xkb_layout, entry.variant)
+            if entry.xkb_layout == wanted_xkb and not entry_canonical:
                 return entry
         for entry in entries:
             if entry.xkb_layout == wanted_xkb:

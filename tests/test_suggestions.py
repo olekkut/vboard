@@ -22,6 +22,10 @@ class HunspellSuggestionEngineTest(unittest.TestCase):
             "3\ndziękuję\nżółć\nPolska\n",
             encoding="utf-8",
         )
+        (self.dictionary_dir / "ru_RU.dic").write_text(
+            "4\nпривет\nприветствие/A\nёлка\nкто-то\n",
+            encoding="utf-8",
+        )
         (self.dictionary_dir / "de_DE.dic").write_text(
             "2\nStraße\nStraßenbahn\n",
             encoding="utf-8",
@@ -49,6 +53,17 @@ class HunspellSuggestionEngineTest(unittest.TestCase):
 
         self.assertEqual(engine.get_suggestions("dzięk", 5), ["dziękuję"])
         self.assertEqual(engine.get_suggestions("żó", 5), ["żółć"])
+
+    def test_russian_unicode_suggestions(self):
+        engine = HunspellSuggestionEngine("ru")
+
+        self.assertEqual(
+            engine.get_suggestions("прив", 5),
+            ["привет", "приветствие"],
+        )
+        self.assertEqual(engine.get_suggestions("ёл", 5), ["ёлка"])
+        self.assertEqual(engine.get_suggestions("кто-", 5), ["кто-то"])
+        self.assertEqual(engine.dictionary_path, str(self.dictionary_dir / "ru_RU.dic"))
 
     def test_german_eszett_is_preserved(self):
         engine = HunspellSuggestionEngine("de")

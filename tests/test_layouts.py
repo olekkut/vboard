@@ -73,6 +73,25 @@ class LayoutsTest(unittest.TestCase):
             self.assertEqual(pl["altgr"][key], char)
             self.assertEqual(pl["altgr_shifted"][key], char.upper())
 
+    def test_russian_jcuken_mapping(self):
+        ru = self.layouts["ru"]
+        self.assertEqual(ru["label"], "Russian")
+        self.assertEqual(get_layout_short_label("ru", self.layouts), "RU")
+        self.assertEqual(ru["xkb_layout"], "ru")
+        self.assertEqual(ru["labels"]["`"], "ё")
+        self.assertEqual(ru["labels"]["Q"], "й")
+        self.assertEqual(ru["labels"]["S"], "ы")
+        self.assertEqual(ru["labels"]["]"], "ъ")
+        self.assertEqual(ru["labels"]["'"], "э")
+        self.assertEqual(ru["labels"]["/"], ".")
+        self.assertEqual(ru["shifted"]["`"], "Ё")
+        self.assertEqual(ru["shifted"]["Q"], "Й")
+        self.assertEqual(ru["shifted"]["S"], "Ы")
+        self.assertEqual(ru["shifted"]["]"], "Ъ")
+        self.assertEqual(ru["shifted"]["\\"], "/")
+        self.assertEqual(ru["shifted"]["/"], ",")
+        self.assertEqual(ru["altgr"]["8"], "₽")
+
     def test_compact_tv_alpha_tiles_exact_grid_ansi_and_iso(self):
         ansi_cells = build_compact_tv_alpha_cells(self.layouts["uk"])
         assert_exact_grid_tiling(self, ansi_cells, expected_cols=33, expected_rows=5)

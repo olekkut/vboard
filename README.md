@@ -87,7 +87,7 @@ sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0 python3-uinput gir1.
 ```
 Optional for word suggestions:
 ```bash
-sudo apt install hunspell-en-us
+sudo apt install hunspell-en-us hunspell-uk hunspell-ru hunspell-pl
 ```
 
 **For Fedora-based distributions:**
@@ -96,7 +96,7 @@ sudo dnf install python3-gobject python3-cairo gtk3 python3-uinput python3-setup
 ```
 Optional for word suggestions:
 ```bash
-sudo dnf install hunspell-en-US
+sudo dnf install hunspell-en-US hunspell-uk hunspell-ru hunspell-pl
 ```
 
 In Fedora KDE, you will also have to create a symlink for qdbus
@@ -110,7 +110,7 @@ sudo pacman -S python-gobject gtk3 python-uinput python-cairo libayatana-appindi
 ```
 Optional for word suggestions:
 ```bash
-sudo pacman -S hunspell-en_us
+sudo pacman -S hunspell-en_us hunspell-uk hunspell-ru hunspell-pl
 ```
 
 ### 2. Clone the repository

@@ -259,6 +259,33 @@ class SystemLayoutSyncTest(unittest.TestCase):
         self.assertEqual(resolved, "xkb:us:dvorak")
         self.assertEqual(self.layouts[resolved]["labels"]["S"], "o")
 
+    def test_russian_winkeys_variant_maps_to_curated_ru_and_phonetic_is_dynamic(self):
+        winkeys_entry = SystemLayoutEntry(0, "ru", "winkeys", "Russian")
+        self.assertEqual(
+            resolve_system_entry_to_vboard_layout(winkeys_entry, self.layouts),
+            "ru",
+        )
+
+        # Reverse sync from Vboard "ru" back to a Plasma ru(winkeys) entry
+        backend = FakeSystemBackend(
+            [
+                SystemLayoutEntry(0, "us", "", "English (US)"),
+                SystemLayoutEntry(1, "ru", "winkeys", "Russian"),
+            ],
+            current_index=0,
+        )
+        controller = SystemLayoutController(backend, self.layouts)
+        self.assertTrue(controller.set_vboard_layout("ru"))
+        self.assertEqual(backend.current_index, 1)
+
+        # Genuinely different Russian variant (phonetic) resolves dynamically via XKB
+        phonetic_entry = SystemLayoutEntry(2, "ru", "phonetic", "Russian (phonetic)")
+        resolved = resolve_system_entry_to_vboard_layout(phonetic_entry, self.layouts)
+        self.assertEqual(resolved, "xkb:ru:phonetic")
+        self.assertEqual(self.layouts[resolved]["labels"]["A"], "а")
+        self.assertEqual(self.layouts[resolved]["labels"]["D"], "д")
+        self.assertEqual(self.layouts[resolved]["labels"]["S"], "с")
+
 
 if __name__ == "__main__":
     unittest.main()
