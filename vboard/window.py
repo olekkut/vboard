@@ -1067,7 +1067,18 @@ class VirtualKeyboard(Gtk.Window):
             return
         if layout_key in self.keyboard_layouts:
             self.set_keyboard_layout(layout_key, sync_system=False, save=False)
-        self.rebuild_layout_buttons()
+        current_signature = [
+            (lid, e.index if e is not None else None)
+            for _btn, lid, e in self.layout_buttons
+        ]
+        new_signature = [
+            (lid, e.index if e is not None else None)
+            for _sc, _dn, lid, e in self.get_fast_switch_items()
+        ]
+        if new_signature != current_signature:
+            self.rebuild_layout_buttons()
+        else:
+            self.update_layout_button()
 
     def set_sync_system_layout(self, enabled):
         enabled = bool(enabled)
@@ -1097,6 +1108,7 @@ class VirtualKeyboard(Gtk.Window):
         """Return [(short_label, tooltip_label, layout_id, system_entry_or_None), ...] for top-bar fast switch."""
         items = []
         seen_layout_ids = set()
+        seen_xkb_layouts = set()
 
         if self.sync_system_layout and self.system_layout_controller is not None:
             try:
@@ -1115,16 +1127,25 @@ class VirtualKeyboard(Gtk.Window):
                 )
                 if resolved_id is not None:
                     seen_layout_ids.add(resolved_id)
+                if entry.xkb_layout:
+                    seen_xkb_layouts.add(entry.xkb_layout)
                 items.append((short_code, entry.display_name, resolved_id, entry))
 
             if len(items) >= 2:
-                if any(lid in seen_layout_ids for lid in ("pl", "uk", "ru")):
-                    for layout_id in ("pl", "uk", "ru"):
-                        if layout_id in self.keyboard_layouts and layout_id not in seen_layout_ids:
+                if any(
+                    lid in seen_layout_ids for lid in ("pl", "uk", "ru")
+                ) or any(xkb in seen_xkb_layouts for xkb in ("pl", "ua", "ru")):
+                    for layout_id, xkb_code in (("pl", "pl"), ("uk", "ua"), ("ru", "ru")):
+                        if (
+                            layout_id in self.keyboard_layouts
+                            and layout_id not in seen_layout_ids
+                            and xkb_code not in seen_xkb_layouts
+                        ):
                             layout_config = self.keyboard_layouts[layout_id]
                             short_code = get_layout_short_label(layout_id, self.keyboard_layouts)
                             items.append((short_code, layout_config["label"], layout_id, None))
                             seen_layout_ids.add(layout_id)
+                            seen_xkb_layouts.add(xkb_code)
                 return items
 
         quick_ids = [
@@ -1168,7 +1189,10 @@ class VirtualKeyboard(Gtk.Window):
                 entry,
             )
             tooltip = f"Switch to {display_name} ({short_code})"
-            tooltip += "\nLeft-click to switch, right-click for all layouts"
+            if entry is None and self.sync_system_layout and self.system_layout_controller is not None:
+                tooltip += "\nAdd this layout in System Settings → Keyboard → Layouts for OS typing sync"
+            else:
+                tooltip += "\nLeft-click to switch, right-click for all layouts"
             button.set_tooltip_text(tooltip)
             self.layout_button_box.pack_start(button, False, False, 0)
             self.layout_buttons.append((button, layout_id, entry))
@@ -1176,15 +1200,32 @@ class VirtualKeyboard(Gtk.Window):
         self.layout_button_box.show_all()
         self.update_layout_button()
 
+    def activate_fast_switch_item(self, layout_id, entry=None):
+        if (
+            entry is None
+            and layout_id is not None
+            and self.sync_system_layout
+            and self.system_layout_controller is not None
+        ):
+            try:
+                self.system_layout_controller.refresh()
+                entry = self.system_layout_controller.find_entry_for_vboard_layout(
+                    layout_id
+                )
+            except (GLib.Error, OSError, RuntimeError):
+                entry = None
+
+        if entry is not None and self.sync_system_layout and self.system_layout_controller is not None:
+            self.select_system_layout_entry(entry)
+        elif layout_id is not None:
+            self.set_keyboard_layout(layout_id)
+
     def on_fast_layout_button_press_event(self, widget, event, layout_id, entry):
         if event.button == 3:
             self.popup_layout_menu(widget, event)
             return True
         if event.button == 1:
-            if entry is not None and self.system_layout_controller is not None:
-                self.select_system_layout_entry(entry)
-            elif layout_id is not None:
-                self.set_keyboard_layout(layout_id)
+            self.activate_fast_switch_item(layout_id, entry)
             return True
         return False
 
@@ -1198,19 +1239,38 @@ class VirtualKeyboard(Gtk.Window):
             except (GLib.Error, OSError, RuntimeError):
                 current_system_index = None
 
+        matching_buttons = [
+            (button, layout_id, entry)
+            for button, layout_id, entry in self.layout_buttons
+            if layout_id == self.keyboard_layout
+        ]
         active_button = None
-        for button, layout_id, entry in self.layout_buttons:
-            is_active = (
-                entry is not None
-                and current_system_index is not None
-                and entry.index == current_system_index
-            ) or (layout_id == self.keyboard_layout)
+        if len(matching_buttons) == 1:
+            active_button = matching_buttons[0][0]
+        elif len(matching_buttons) > 1:
+            for button, _layout_id, entry in matching_buttons:
+                if (
+                    entry is not None
+                    and current_system_index is not None
+                    and entry.index == current_system_index
+                ):
+                    active_button = button
+                    break
+            if active_button is None:
+                active_button = matching_buttons[0][0]
+
+        stale_flags = (
+            Gtk.StateFlags.ACTIVE
+            | Gtk.StateFlags.PRELIGHT
+            | Gtk.StateFlags.FOCUSED
+        )
+        for button, _layout_id, _entry in self.layout_buttons:
             ctx = button.get_style_context()
-            if is_active:
+            if button is active_button:
                 ctx.add_class("active-layout")
-                active_button = button
             else:
                 ctx.remove_class("active-layout")
+                button.unset_state_flags(stale_flags)
 
         if active_button is not None:
             self.layout_button = active_button
@@ -1224,28 +1284,48 @@ class VirtualKeyboard(Gtk.Window):
     def cycle_keyboard_layout(self):
         if self.sync_system_layout and self.system_layout_controller is not None:
             try:
-                cycled = self.system_layout_controller.cycle_next_layout()
-            except (GLib.Error, OSError, RuntimeError) as exc:
-                print(f"Warning: Could not cycle system keyboard layout ({exc}).")
-                cycled = None
-            if cycled is not None:
-                _next_entry, next_layout_id = cycled
-                if next_layout_id in self.keyboard_layouts:
-                    self.set_keyboard_layout(
-                        next_layout_id, sync_system=False, save=True
-                    )
-                return
+                self.system_layout_controller.refresh()
+            except (GLib.Error, OSError, RuntimeError):
+                pass
 
-        quick_available = [
-            layout_key
-            for layout_key in QUICK_SWITCH_LAYOUTS
-            if layout_key in self.keyboard_layouts
-        ]
-        available = (
-            quick_available
-            if len(quick_available) >= 2
-            else [layout_key for layout_key, _label in self.keyboard_layout_choices]
-        )
+        items = self.get_fast_switch_items()
+        if len(items) >= 2:
+            current_system_index = None
+            if self.sync_system_layout and self.system_layout_controller is not None:
+                try:
+                    current_system_index = (
+                        self.system_layout_controller.get_current_index()
+                    )
+                except (GLib.Error, OSError, RuntimeError):
+                    current_system_index = None
+
+            current_pos = None
+            matching_positions = [
+                idx
+                for idx, (_sc, _dn, layout_id, _entry) in enumerate(items)
+                if layout_id == self.keyboard_layout
+            ]
+            if len(matching_positions) == 1:
+                current_pos = matching_positions[0]
+            elif len(matching_positions) > 1:
+                for idx in matching_positions:
+                    entry = items[idx][3]
+                    if (
+                        entry is not None
+                        and current_system_index is not None
+                        and entry.index == current_system_index
+                    ):
+                        current_pos = idx
+                        break
+                if current_pos is None:
+                    current_pos = matching_positions[0]
+
+            next_pos = 0 if current_pos is None else (current_pos + 1) % len(items)
+            _sc, _dn, next_layout_id, next_entry = items[next_pos]
+            self.activate_fast_switch_item(next_layout_id, next_entry)
+            return
+
+        available = [layout_key for layout_key, _label in self.keyboard_layout_choices]
         next_layout = get_next_layout_id(self.keyboard_layout, available)
         if next_layout is not None:
             self.set_keyboard_layout(next_layout, sync_system=self.sync_system_layout)
@@ -2350,6 +2430,7 @@ class VirtualKeyboard(Gtk.Window):
                     {rgba((48, 58, 78), 1.0)}
                 );
                 box-shadow: inset 0 1px {rgba((255, 255, 255), 0.1)};
+                transition: none;
             }}
 
             #vboard-main #layout-button label {{
@@ -2785,6 +2866,7 @@ class VirtualKeyboard(Gtk.Window):
                 color: rgb({rgb_css(text_rgb)});
                 background-color: {rgba(key_rgb, 1.0)};
                 background-image: none;
+                transition: none;
             }}
 
             #vboard-main #layout-button label {{
@@ -2795,6 +2877,17 @@ class VirtualKeyboard(Gtk.Window):
             #vboard-main #layout-button:hover {{
                 border: 1px solid {accent};
                 background-color: {rgba(hover_rgb, 1.0)};
+            }}
+
+            #vboard-main #layout-button.active-layout {{
+                border: 1px solid {rgba(command_modifier_rgb, 1.0)};
+                color: white;
+                background-color: {rgba(command_modifier_rgb, 1.0)};
+                background-image: none;
+            }}
+
+            #vboard-main #layout-button.active-layout label {{
+                color: white;
             }}
 
             #vboard-main tooltip {{
@@ -2925,6 +3018,7 @@ class VirtualKeyboard(Gtk.Window):
                 min-width: 54px;
                 border: 1px solid {self.text_color};
                 background-image: none;
+                transition: none;
             }}
 
             #vboard-main #layout-button label {{
@@ -2934,6 +3028,17 @@ class VirtualKeyboard(Gtk.Window):
             #vboard-main #esc-button:hover,
             #vboard-main #layout-button:hover {{
                 border: 1px solid #00CACB;
+            }}
+
+            #vboard-main #layout-button.active-layout {{
+                border: 1px solid rgb{command_modifier_rgb};
+                color: white;
+                background-color: {rgba(command_modifier_rgb, 1.0)};
+                background-image: none;
+            }}
+
+            #vboard-main #layout-button.active-layout label {{
+                color: white;
             }}
 
             #vboard-main tooltip {{

@@ -1,3 +1,11 @@
+vboard (2.7.3-1) unstable; urgency=medium
+
+  * fix dual active button glow when switching to a layout not in Plasma
+  * make sidebar language button under Hide cycle through all fast-switch
+    layouts (PL/UA/RU) consistently
+
+ -- Aleksander Kutycki <74899889+olekkut@users.noreply.github.com>  Tue, 24 Nov 2026 19:50:00 +0000
+
 vboard (2.7.2-1) unstable; urgency=medium
 
   * add one-click top-bar fast language switcher buttons (EN/PL/UA/RU) with

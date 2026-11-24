@@ -231,16 +231,46 @@ class VirtualKeyboardIntegrationTest(unittest.TestCase):
         self.assertTrue(ru_btn.get_style_context().has_class("active-layout"))
         self.assertFalse(ua_btn.get_style_context().has_class("active-layout"))
 
-        # Even if Plasma only had PL + UA configured, RU is still added to fast-switch bar
+        # Even if Plasma only has PL + UA configured (no RU in KDE System Settings):
+        # 1. Switching to RU must glow ONLY RU (never UA + RU at once!)
+        # 2. Cycling via the sidebar button under Hide must cycle PL -> UA -> RU -> PL
         self.fake_backend.entries = [
             SystemLayoutEntry(0, "pl", "", "Polish"),
             SystemLayoutEntry(1, "ua", "", "Ukrainian"),
         ]
+        self.fake_backend.current_index = 1  # Plasma stuck on UA
+        self.window.set_keyboard_mode(KEYBOARD_MODE_COMPACT_TV, save=False)
+        self.window.set_keyboard_layout("uk", sync_system=False, save=False)
         self.window.rebuild_layout_buttons()
+
         labels_without_ru_in_plasma = [
             btn.get_label() for btn, _lid, _entry in self.window.layout_buttons
         ]
         self.assertEqual(labels_without_ru_in_plasma, ["PL", "UA", "RU"])
+
+        # Switch to RU: ONLY RU glows; UA and PL must NOT glow
+        self.window.activate_fast_switch_item("ru", None)
+        glowing = [
+            btn.get_label()
+            for btn, _lid, _entry in self.window.layout_buttons
+            if btn.get_style_context().has_class("active-layout")
+        ]
+        self.assertEqual(glowing, ["RU"])
+        self.assertEqual(self.window.key_buttons[TV_ACTION_LANG].get_label(), "RU")
+
+        # Cycle via the button under Hide: RU -> PL -> UA -> RU
+        visited = []
+        for _ in range(3):
+            self.window.cycle_keyboard_layout()
+            visited.append(self.window.key_buttons[TV_ACTION_LANG].get_label())
+            glowing = [
+                btn.get_label()
+                for btn, _lid, _entry in self.window.layout_buttons
+                if btn.get_style_context().has_class("active-layout")
+            ]
+            self.assertEqual(len(glowing), 1)
+            self.assertEqual(glowing[0], visited[-1])
+        self.assertEqual(visited, ["PL", "UA", "RU"])
 
 
 if __name__ == "__main__":
