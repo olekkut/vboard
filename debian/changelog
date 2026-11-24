@@ -1,3 +1,10 @@
+vboard (2.7.1-1) unstable; urgency=medium
+
+  * add Ukrainian and Polish layouts, complete Russian support, two-way system
+    layout sync, top-bar layout switcher, and Compact for TV mode + theme
+
+ -- Aleksander Kutycki <74899889+olekkut@users.noreply.github.com>  Tue, 24 Nov 2026 19:24:00 +0000
+
 vboard (2.7.0-1) unstable; urgency=medium
 
   * add --toggle and --help arguments
