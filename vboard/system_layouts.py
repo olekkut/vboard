@@ -525,6 +525,10 @@ class SystemLayoutController:
         return self.set_layout_by_index(entry.index)
 
     def cycle_next_layout(self):
+        try:
+            self.refresh()
+        except (GLib.Error, OSError, RuntimeError):
+            pass
         entries = self.get_system_entries()
         if len(entries) < 2:
             return None

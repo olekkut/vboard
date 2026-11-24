@@ -1,6 +1,6 @@
 APP_DISPLAY_NAME = "Vboard"
 APP_ID = "io.github.archisman-panigrahi.vboard"
-VERSION = "2.7.1"
+VERSION = "2.7.2"
 
 MODIFIER_KEYS = (
     "Shift_L",
@@ -51,6 +51,7 @@ NUMPAD_KEYS = (
 )
 
 DEFAULT_KEYBOARD_LAYOUT = "en"
+QUICK_SWITCH_LAYOUTS = ("en", "pl", "uk", "ru")
 
 KEYBOARD_MODE_STANDARD = "standard"
 KEYBOARD_MODE_COMPACT_TV = "compact_tv"

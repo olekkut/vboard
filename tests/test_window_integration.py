@@ -212,6 +212,36 @@ class VirtualKeyboardIntegrationTest(unittest.TestCase):
             self.window.gesture_controller.key_event_to_active_gesture_char("'"), "э"
         )
 
+    def test_top_bar_fast_switch_buttons_include_ru_ua_pl(self):
+        labels = [btn.get_label() for btn, _lid, _entry in self.window.layout_buttons]
+        self.assertEqual(labels, ["EN", "PL", "UA", "RU"])
+
+        # Active button (UA at startup) has active-layout class
+        ua_btn = next(btn for btn, lid, _ in self.window.layout_buttons if lid == "uk")
+        ru_btn = next(btn for btn, lid, _ in self.window.layout_buttons if lid == "ru")
+        pl_btn = next(btn for btn, lid, _ in self.window.layout_buttons if lid == "pl")
+        self.assertTrue(ua_btn.get_style_context().has_class("active-layout"))
+        self.assertFalse(ru_btn.get_style_context().has_class("active-layout"))
+
+        # Direct one-click switch to RU updates both system backend and active highlight
+        ru_entry = next(entry for _, lid, entry in self.window.layout_buttons if lid == "ru")
+        self.window.select_system_layout_entry(ru_entry)
+        self.assertEqual(self.fake_backend.current_index, 3)
+        self.assertEqual(self.window.keyboard_layout, "ru")
+        self.assertTrue(ru_btn.get_style_context().has_class("active-layout"))
+        self.assertFalse(ua_btn.get_style_context().has_class("active-layout"))
+
+        # Even if Plasma only had PL + UA configured, RU is still added to fast-switch bar
+        self.fake_backend.entries = [
+            SystemLayoutEntry(0, "pl", "", "Polish"),
+            SystemLayoutEntry(1, "ua", "", "Ukrainian"),
+        ]
+        self.window.rebuild_layout_buttons()
+        labels_without_ru_in_plasma = [
+            btn.get_label() for btn, _lid, _entry in self.window.layout_buttons
+        ]
+        self.assertEqual(labels_without_ru_in_plasma, ["PL", "UA", "RU"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -19,6 +19,7 @@ from .constants import (
     LIGHT_BACKGROUND_COLORS,
     MODIFIER_KEYS,
     ONBOARD_BACKGROUND_PRESET,
+    QUICK_SWITCH_LAYOUTS,
     SPACER_KEY_PREFIX,
     SUGGESTION_LIMIT,
     SUPPORTED_WORD_CONNECTORS,
@@ -109,8 +110,7 @@ DBUS_MENU_XML = """
       <arg name="parentId" type="i" direction="in"/>
       <arg name="recursionDepth" type="i" direction="in"/>
       <arg name="propertyNames" type="as" direction="in"/>
-      <arg name="revision" type="u" direction="out"/>
-      <arg name="layout" type="(ia{sv}av)" direction="out"/>
+      <arg name="revision" t      <arg name="layout" type="(ia{sv}av)" direction="out"/>
     </method>
     <method name="GetGroupProperties">
       <arg name="ids" type="ai" direction="in"/>
@@ -1067,6 +1067,7 @@ class VirtualKeyboard(Gtk.Window):
             return
         if layout_key in self.keyboard_layouts:
             self.set_keyboard_layout(layout_key, sync_system=False, save=False)
+        self.rebuild_layout_buttons()
 
     def set_sync_system_layout(self, enabled):
         enabled = bool(enabled)
@@ -1088,23 +1089,133 @@ class VirtualKeyboard(Gtk.Window):
                     self.set_keyboard_layout(
                         current_layout, sync_system=False, save=False
                     )
-        self.update_layout_button()
+        self.rebuild_layout_buttons()
         self.sync_settings_dialog_controls()
         self.save_settings()
 
+    def get_fast_switch_items(self):
+        """Return [(short_label, tooltip_label, layout_id, system_entry_or_None), ...] for top-bar fast switch."""
+        items = []
+        seen_layout_ids = set()
+
+        if self.sync_system_layout and self.system_layout_controller is not None:
+            try:
+                system_entries = self.system_layout_controller.get_system_entries()
+            except (GLib.Error, OSError, RuntimeError):
+                system_entries = ()
+
+            for entry in system_entries:
+                resolved_id = resolve_system_entry_to_vboard_layout(
+                    entry, self.keyboard_layouts
+                )
+                short_code = (
+                    get_layout_short_label(resolved_id, self.keyboard_layouts)
+                    if resolved_id
+                    else entry.xkb_layout[:3].upper()
+                )
+                if resolved_id is not None:
+                    seen_layout_ids.add(resolved_id)
+                items.append((short_code, entry.display_name, resolved_id, entry))
+
+            if len(items) >= 2:
+                if any(lid in seen_layout_ids for lid in ("pl", "uk", "ru")):
+                    for layout_id in ("pl", "uk", "ru"):
+                        if layout_id in self.keyboard_layouts and layout_id not in seen_layout_ids:
+                            layout_config = self.keyboard_layouts[layout_id]
+                            short_code = get_layout_short_label(layout_id, self.keyboard_layouts)
+                            items.append((short_code, layout_config["label"], layout_id, None))
+                            seen_layout_ids.add(layout_id)
+                return items
+
+        quick_ids = [
+            layout_id
+            for layout_id in QUICK_SWITCH_LAYOUTS
+            if layout_id in self.keyboard_layouts
+        ]
+        if self.keyboard_layout in self.keyboard_layouts and self.keyboard_layout not in quick_ids:
+            quick_ids.append(self.keyboard_layout)
+
+        for layout_id in quick_ids:
+            if layout_id in seen_layout_ids:
+                continue
+            layout_config = self.keyboard_layouts[layout_id]
+            short_code = get_layout_short_label(layout_id, self.keyboard_layouts)
+            items.append((short_code, layout_config["label"], layout_id, None))
+
+        return items
+
+    def rebuild_layout_buttons(self):
+        if self.layout_button_box is None:
+            return
+
+        for child in self.layout_button_box.get_children():
+            self.layout_button_box.remove(child)
+
+        self.layout_buttons = []
+        self.layout_button = None
+
+        items = self.get_fast_switch_items()
+        for short_code, display_name, layout_id, entry in items:
+            button = Gtk.Button(label=short_code)
+            button.set_can_focus(False)
+            button.set_focus_on_click(False)
+            button.set_name("layout-button")
+            button.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+            button.connect(
+                "button-press-event",
+                self.on_fast_layout_button_press_event,
+                layout_id,
+                entry,
+            )
+            tooltip = f"Switch to {display_name} ({short_code})"
+            tooltip += "\nLeft-click to switch, right-click for all layouts"
+            button.set_tooltip_text(tooltip)
+            self.layout_button_box.pack_start(button, False, False, 0)
+            self.layout_buttons.append((button, layout_id, entry))
+
+        self.layout_button_box.show_all()
+        self.update_layout_button()
+
+    def on_fast_layout_button_press_event(self, widget, event, layout_id, entry):
+        if event.button == 3:
+            self.popup_layout_menu(widget, event)
+            return True
+        if event.button == 1:
+            if entry is not None and self.system_layout_controller is not None:
+                self.select_system_layout_entry(entry)
+            elif layout_id is not None:
+                self.set_keyboard_layout(layout_id)
+            return True
+        return False
+
     def update_layout_button(self):
         short_label = self.get_current_layout_short_label()
-        layout_config = self.keyboard_layouts.get(self.keyboard_layout, {})
-        layout_label = layout_config.get("label", self.keyboard_layout)
 
-        if self.layout_button is not None:
-            self.layout_button.set_label(short_label)
-            tooltip = f"Keyboard layout: {layout_label} ({short_label})"
-            if self.sync_system_layout and self.system_layout_controller is not None:
-                tooltip += "\nClick to switch system layout, right-click to choose"
+        current_system_index = None
+        if self.sync_system_layout and self.system_layout_controller is not None:
+            try:
+                current_system_index = self.system_layout_controller.get_current_index()
+            except (GLib.Error, OSError, RuntimeError):
+                current_system_index = None
+
+        active_button = None
+        for button, layout_id, entry in self.layout_buttons:
+            is_active = (
+                entry is not None
+                and current_system_index is not None
+                and entry.index == current_system_index
+            ) or (layout_id == self.keyboard_layout)
+            ctx = button.get_style_context()
+            if is_active:
+                ctx.add_class("active-layout")
+                active_button = button
             else:
-                tooltip += "\nClick to switch layout, right-click to choose"
-            self.layout_button.set_tooltip_text(tooltip)
+                ctx.remove_class("active-layout")
+
+        if active_button is not None:
+            self.layout_button = active_button
+        elif self.layout_buttons:
+            self.layout_button = self.layout_buttons[0][0]
 
         tv_lang_button = self.key_buttons.get(TV_ACTION_LANG)
         if tv_lang_button is not None:
@@ -1125,7 +1236,16 @@ class VirtualKeyboard(Gtk.Window):
                     )
                 return
 
-        available = [layout_key for layout_key, _label in self.keyboard_layout_choices]
+        quick_available = [
+            layout_key
+            for layout_key in QUICK_SWITCH_LAYOUTS
+            if layout_key in self.keyboard_layouts
+        ]
+        available = (
+            quick_available
+            if len(quick_available) >= 2
+            else [layout_key for layout_key, _label in self.keyboard_layout_choices]
+        )
         next_layout = get_next_layout_id(self.keyboard_layout, available)
         if next_layout is not None:
             self.set_keyboard_layout(next_layout, sync_system=self.sync_system_layout)
@@ -1573,16 +1693,13 @@ class VirtualKeyboard(Gtk.Window):
         self.esc_button.set_name("esc-button")
         self.header.pack_start(self.esc_button)
 
-        self.layout_button = Gtk.Button(label=self.get_current_layout_short_label())
-        self.layout_button.set_can_focus(False)
-        self.layout_button.set_focus_on_click(False)
-        self.layout_button.set_name("layout-button")
-        self.layout_button.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-        self.layout_button.connect(
-            "button-press-event", self.on_layout_button_press_event
+        self.layout_button_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL,
+            spacing=2,
         )
-        self.header.pack_start(self.layout_button)
-        self.update_layout_button()
+        self.layout_button_box.set_name("layout-button-box")
+        self.header.pack_start(self.layout_button_box)
+        self.rebuild_layout_buttons()
 
         self.create_button("☰", self.change_visibility, callbacks=1)
         self.create_button(
@@ -2249,6 +2366,15 @@ class VirtualKeyboard(Gtk.Window):
                 );
             }}
 
+            #vboard-main #layout-button.active-layout {{
+                border: 1px solid {rgba((102, 165, 232), 1.0)};
+                background-image: linear-gradient(
+                    to bottom,
+                    {rgba((53, 114, 184), 1.0)},
+                    {rgba((33, 81, 140), 1.0)}
+                );
+            }}
+
             #vboard-main tooltip {{
                 color: white;
                 padding: 5px;
@@ -2471,6 +2597,11 @@ class VirtualKeyboard(Gtk.Window):
             #vboard-main #layout-button:hover {{
                 border: 2px solid #FFD600;
                 background-color: {rgba((82, 82, 82), 1.0)};
+            }}
+
+            #vboard-main #layout-button.active-layout {{
+                border: 2px solid #FFFFFF;
+                background-color: {rgba((0, 118, 196), 1.0)};
             }}
 
             #vboard-main tooltip {{

@@ -1,3 +1,10 @@
+vboard (2.7.2-1) unstable; urgency=medium
+
+  * add one-click top-bar fast language switcher buttons (EN/PL/UA/RU) with
+    active layout highlight and live Plasma layout list refresh
+
+ -- Aleksander Kutycki <74899889+olekkut@users.noreply.github.com>  Tue, 24 Nov 2026 19:35:00 +0000
+
 vboard (2.7.1-1) unstable; urgency=medium
 
   * add Ukrainian and Polish layouts, complete Russian support, two-way system
