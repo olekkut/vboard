@@ -199,6 +199,8 @@ class PlasmaLayoutBackend:
     def get_current_index(self):
         result = self._call("getLayout")
         index = int(result.unpack()[0])
+        if index >= len(self.entries):
+            self.refresh()
         if 0 <= index < len(self.entries):
             return index
         return None

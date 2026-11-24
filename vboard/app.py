@@ -30,23 +30,26 @@ class VboardApplication(Gtk.Application):
         GLib.set_application_name(APP_DISPLAY_NAME)
 
     def ensure_window(self):
-        if self.window is None:
+        created = self.window is None
+        if created:
+            install_kwin_rule_if_needed()
             self.window = VirtualKeyboard(application=self)
-            self.window.connect("destroy", lambda w: w.save_settings())
             self.window.connect("destroy", self.on_window_destroy)
             self.window.connect("configure-event", self.window.on_resize)
-            if self.window.config_pos_x > 0 and self.window.config_pos_y > 0:
+            if self.window.config_pos_x > 0 or self.window.config_pos_y > 0:
                 self.window.move(self.window.config_pos_x, self.window.config_pos_y)
             self.window.show_all()
             self.window.change_visibility()
             if self.window.start_minimized and self.window.tray_icon is not None:
                 self.window.hide()
             self.window.update_tray_menu()
-        return self.window
+        return self.window, created
 
     def do_activate(self):
-        window = self.ensure_window()
-        window.show_all()
+        window, created = self.ensure_window()
+        if created and window.start_minimized and window.tray_icon is not None:
+            return
+        window.show()
         window.present()
         window.request_keep_above()
         window.update_tray_menu()
@@ -59,7 +62,11 @@ class VboardApplication(Gtk.Application):
 
         if args == ["--toggle"]:
             if self.window is None:
-                self.activate()
+                window, _created = self.ensure_window()
+                window.show()
+                window.present()
+                window.request_keep_above()
+                window.update_tray_menu()
             else:
                 self.window.toggle_visibility()
             return 0
@@ -72,11 +79,15 @@ class VboardApplication(Gtk.Application):
         return 1
 
     def on_window_destroy(self, window):
+        window.cleanup_on_destroy()
         self.window = None
         self.quit()
 
 
 def main(argv=None):
-    install_kwin_rule_if_needed()
+    args = list(sys.argv if argv is None else argv)
+    if args[1:] in (["--help"], ["-h"]):
+        sys.stdout.write(USAGE)
+        return 0
     app = VboardApplication()
-    return app.run(argv or sys.argv)
+    return app.run(args)

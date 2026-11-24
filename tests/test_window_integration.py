@@ -272,6 +272,100 @@ class VirtualKeyboardIntegrationTest(unittest.TestCase):
             self.assertEqual(glowing[0], visited[-1])
         self.assertEqual(visited, ["PL", "UA", "RU"])
 
+    def test_status_notifier_dbus_xml_and_menu_serialization(self):
+        from vboard.gtk import Gio, GLib
+        from vboard.window import (
+            DBUS_MENU_XML,
+            STATUS_NOTIFIER_ITEM_XML,
+            StatusNotifierTrayIcon,
+        )
+
+        sni_info = Gio.DBusNodeInfo.new_for_xml(STATUS_NOTIFIER_ITEM_XML)
+        menu_info = Gio.DBusNodeInfo.new_for_xml(DBUS_MENU_XML)
+        self.assertEqual(sni_info.interfaces[0].name, "org.kde.StatusNotifierItem")
+        self.assertEqual(menu_info.interfaces[0].name, "com.canonical.dbusmenu")
+
+        tray = StatusNotifierTrayIcon.__new__(StatusNotifierTrayIcon)
+        tray.window = self.window
+        tray.menu_revision = 1
+
+        root_layout = tray.get_menu_layout(0)
+        root_variant = GLib.Variant("(u(ia{sv}av))", (1, root_layout))
+        self.assertEqual(root_variant.unpack()[1][0], 0)
+
+        submenu_layout = tray.get_menu_layout(StatusNotifierTrayIcon.MENU_LAYOUT_ID)
+        submenu_variant = GLib.Variant("(u(ia{sv}av))", (1, submenu_layout))
+        self.assertEqual(submenu_variant.unpack()[1][0], StatusNotifierTrayIcon.MENU_LAYOUT_ID)
+        self.assertGreaterEqual(len(submenu_variant.unpack()[1][2]), 3)
+
+        group_variant = GLib.Variant(
+            "(a(ia{sv}))",
+            ([(1, tray.get_menu_properties(1)), (12, tray.get_menu_properties(12))],),
+        )
+        self.assertEqual(len(group_variant.unpack()[0]), 2)
+
+    def test_toggle_visibility_preserves_collapsed_header_controls(self):
+        self.window.show_all()
+        self.window.change_visibility()
+        self.assertFalse(self.window.color_combobox.get_visible())
+
+        self.window.toggle_visibility()  # hide
+        self.assertFalse(self.window.get_visible())
+        self.window.toggle_visibility()  # show again
+        self.assertTrue(self.window.get_visible())
+        self.assertFalse(self.window.color_combobox.get_visible())
+
+    def test_opacity_formatting_and_resilient_settings_read(self):
+        self.window.opacity = "0.90"
+        self.window.change_opacity(None, True)
+        self.assertEqual(self.window.opacity, "0.91")
+        self.window.change_opacity(None, False)
+        self.assertEqual(self.window.opacity, "0.90")
+
+        with open(self.window.CONFIG_FILE, "w", encoding="utf-8") as handle:
+            handle.write("[DEFAULT]\nopacity = not_a_number\nwidth = bad\n")
+        self.window.read_settings()
+        self.assertEqual(self.window.opacity, "0.90")
+        self.assertEqual(self.window.width, 0)
+
+    def test_kwin_rule_installer_creates_missing_dir_and_preserves_position(self):
+        import subprocess
+
+        script_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "scripts", "install-kwin-rule.sh")
+        )
+        with tempfile.TemporaryDirectory() as fake_home:
+            env = dict(os.environ, HOME=fake_home, XDG_CONFIG_HOME=os.path.join(fake_home, ".config"))
+            first = subprocess.run(
+                ["bash", script_path, "--scope=user"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(first.returncode, 0, first.stderr)
+            rules_path = os.path.join(fake_home, ".config", "kwinrulesrc")
+            self.assertTrue(os.path.isfile(rules_path))
+            with open(rules_path, encoding="utf-8") as handle:
+                content = handle.read()
+            self.assertIn("wmclass=io.github.archisman-panigrahi.vboard", content)
+
+            # Customize position and verify re-running preserves it and stays idempotent
+            updated = content.replace("position=0,0", "position=120,340")
+            with open(rules_path, "w", encoding="utf-8") as handle:
+                handle.write(updated)
+            second = subprocess.run(
+                ["bash", script_path, "--scope=user"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(second.stdout.strip(), "")
+            with open(rules_path, encoding="utf-8") as handle:
+                self.assertIn("position=120,340", handle.read())
+
 
 if __name__ == "__main__":
     unittest.main()

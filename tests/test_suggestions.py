@@ -87,6 +87,25 @@ class HunspellSuggestionEngineTest(unittest.TestCase):
         self.assertIsNone(engine.normalize_word("слово123"))
         self.assertIsNone(engine.normalize_word("--"))
 
+    def test_non_utf8_hunspell_dictionaries_from_aff_charset(self):
+        (self.dictionary_dir / "pl_PL.aff").write_text(
+            "SET ISO8859-2\n", encoding="ascii"
+        )
+        (self.dictionary_dir / "pl_PL.dic").write_bytes(
+            "2\nżółć/A\nżółty/B\n".encode("iso-8859-2")
+        )
+        pl_engine = HunspellSuggestionEngine("pl")
+        self.assertEqual(pl_engine.get_suggestions("żół", 5), ["żółć", "żółty"])
+
+        (self.dictionary_dir / "ru_RU.aff").write_text(
+            "SET KOI8-R\n", encoding="ascii"
+        )
+        (self.dictionary_dir / "ru_RU.dic").write_bytes(
+            "2\nпривет/A\nпример/B\n".encode("koi8-r")
+        )
+        ru_engine = HunspellSuggestionEngine("ru")
+        self.assertEqual(ru_engine.get_suggestions("при", 5), ["привет", "пример"])
+
 
 if __name__ == "__main__":
     unittest.main()

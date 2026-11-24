@@ -59,8 +59,14 @@ reload_kwin_rules() {
     "$dbus_cmd" org.kde.KWin /KWin reconfigure >/dev/null 2>&1 || true
 }
 
-python3 - "$CONFIG_FILE" "$RULE_NAME" "$APP_ID" <<'PY'
+PYTHON_BIN="python3"
+if [[ -x /usr/bin/python3 ]]; then
+    PYTHON_BIN="/usr/bin/python3"
+fi
+
+CHANGED="$("$PYTHON_BIN" - "$CONFIG_FILE" "$RULE_NAME" "$APP_ID" <<'PY'
 import configparser
+import io
 import os
 import sys
 
@@ -68,10 +74,17 @@ config_file = sys.argv[1]
 rule_name = sys.argv[2]
 app_id = sys.argv[3]
 
-config = configparser.ConfigParser(interpolation=None, allow_no_value=True)
+original_text = None
+config = configparser.ConfigParser(
+    interpolation=None,
+    allow_no_value=True,
+    strict=False,
+)
 config.optionxform = str
 if os.path.exists(config_file):
-    config.read(config_file)
+    with open(config_file, "r", encoding="utf-8", errors="replace") as handle:
+        original_text = handle.read()
+    config.read_string(original_text)
 
 if not config.has_section("General"):
     config.add_section("General")
@@ -86,6 +99,8 @@ for option in list(config.options(rule_name)):
 for legacy_key in ("title", "titlematch"):
     config.remove_option(rule_name, legacy_key)
 
+existing_position = config.get(rule_name, "position", fallback="0,0")
+
 # KWin stores the application-identity matcher under the historical wmclass keys.
 values = {
     "Description": "vboard always on top, no focus, remember position",
@@ -93,7 +108,7 @@ values = {
     "wmclass": app_id,
     "wmclassmatch": "1",
     "wmclasscomplete": "false",
-    "position": "0,0",
+    "position": existing_position or "0,0",
     "positionrule": "4",
     "above": "true",
     "aboverule": "2",
@@ -114,10 +129,23 @@ if rule_name not in rules:
 config.set("General", "rules", ",".join(rules))
 config.set("General", "count", str(len(rules)))
 
-with open(config_file, "w", encoding="utf-8") as handle:
-    config.write(handle)
+buffer = io.StringIO()
+config.write(buffer, space_around_delimiters=False)
+new_text = buffer.getvalue()
+
+if new_text != original_text:
+    parent_dir = os.path.dirname(config_file)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    with open(config_file, "w", encoding="utf-8") as handle:
+        handle.write(new_text)
+    print("1")
+else:
+    print("0")
 PY
+)"
 
-reload_kwin_rules
-
-echo "Installed KWin rule in: $CONFIG_FILE [$RULE_NAME]"
+if [[ "$CHANGED" == "1" ]]; then
+    reload_kwin_rules
+    echo "Installed KWin rule in: $CONFIG_FILE [$RULE_NAME]"
+fi

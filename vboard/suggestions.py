@@ -38,6 +38,43 @@ class HunspellSuggestionEngine:
         self.dictionary_path = None
         self.loaded = False
 
+    @staticmethod
+    def detect_dictionary_encoding(dic_path):
+        aff_path = os.path.splitext(dic_path)[0] + ".aff"
+        if not os.path.isfile(aff_path):
+            return "utf-8"
+
+        aliases = {
+            "UTF-8": "utf-8",
+            "UTF8": "utf-8",
+            "ISO8859-1": "iso-8859-1",
+            "ISO8859-2": "iso-8859-2",
+            "ISO8859-5": "iso-8859-5",
+            "ISO8859-15": "iso-8859-15",
+            "KOI8-R": "koi8-r",
+            "KOI8-U": "koi8-u",
+            "MICROSOFT-CP1251": "cp1251",
+            "CP1251": "cp1251",
+            "WINDOWS-1251": "cp1251",
+            "MICROSOFT-CP1252": "cp1252",
+            "CP1252": "cp1252",
+        }
+        try:
+            with open(aff_path, "r", encoding="ascii", errors="ignore") as aff_handle:
+                for line in aff_handle:
+                    stripped = line.strip()
+                    if stripped.startswith("SET "):
+                        raw_charset = stripped.split(None, 1)[1].strip().upper()
+                        encoding = aliases.get(raw_charset, raw_charset.lower())
+                        try:
+                            "".encode(encoding)
+                            return encoding
+                        except LookupError:
+                            return "utf-8"
+        except OSError:
+            pass
+        return "utf-8"
+
     def ensure_loaded(self):
         if self.loaded:
             return
@@ -47,9 +84,10 @@ class HunspellSuggestionEngine:
         if self.dictionary_path is None:
             return
 
+        encoding = self.detect_dictionary_encoding(self.dictionary_path)
         words = set()
         try:
-            with open(self.dictionary_path, "r", encoding="utf-8", errors="ignore") as handle:
+            with open(self.dictionary_path, "r", encoding=encoding, errors="ignore") as handle:
                 for index, line in enumerate(handle):
                     if index == 0 and line.strip().isdigit():
                         continue

@@ -110,7 +110,8 @@ DBUS_MENU_XML = """
       <arg name="parentId" type="i" direction="in"/>
       <arg name="recursionDepth" type="i" direction="in"/>
       <arg name="propertyNames" type="as" direction="in"/>
-      <arg name="revision" t      <arg name="layout" type="(ia{sv}av)" direction="out"/>
+      <arg name="revision" type="u" direction="out"/>
+      <arg name="layout" type="(ia{sv}av)" direction="out"/>
     </method>
     <method name="GetGroupProperties">
       <arg name="ids" type="ai" direction="in"/>
@@ -303,10 +304,11 @@ class StatusNotifierTrayIcon:
         invocation,
     ):
         if method_name == "GetLayout":
+            parent_id, _recursion_depth, _property_names = parameters.unpack()
             invocation.return_value(
                 GLib.Variant(
                     "(u(ia{sv}av))",
-                    (self.menu_revision, self.get_menu_layout()),
+                    (self.menu_revision, self.get_menu_layout(parent_id)),
                 )
             )
             return
@@ -316,7 +318,7 @@ class StatusNotifierTrayIcon:
             invocation.return_value(
                 GLib.Variant(
                     "(a(ia{sv}))",
-                    ([self.get_menu_properties(item_id) for item_id in ids],),
+                    ([(item_id, self.get_menu_properties(item_id)) for item_id in ids],),
                 )
             )
             return
@@ -402,6 +404,14 @@ class StatusNotifierTrayIcon:
                 },
             ),
             (
+                12,
+                {
+                    "label": "Start Minimized",
+                    "toggle-type": "checkmark",
+                    "toggle-state": int(self.window.start_minimized),
+                },
+            ),
+            (
                 11,
                 {
                     "label": "Compact for TV Layout",
@@ -475,11 +485,17 @@ class StatusNotifierTrayIcon:
             (item_id, self.get_menu_properties(item_id), children or []),
         )
 
-    def get_menu_layout(self):
+    def get_menu_layout(self, parent_id=0):
         layout_children = [
             self.menu_layout_item(self.layout_item_id(index))
             for index, _choice in enumerate(self.window.keyboard_layout_choices)
         ]
+        if parent_id == self.MENU_LAYOUT_ID:
+            return (
+                self.MENU_LAYOUT_ID,
+                self.get_menu_properties(self.MENU_LAYOUT_ID),
+                layout_children,
+            )
         children = []
         for item_id, _properties in self.menu_rows():
             if item_id == self.MENU_LAYOUT_ID:
@@ -487,6 +503,11 @@ class StatusNotifierTrayIcon:
             else:
                 children.append(self.menu_layout_item(item_id))
         return (0, {}, children)
+
+    @staticmethod
+    def _run_once(callback, *args):
+        callback(*args)
+        return False
 
     def handle_menu_event(self, item_id, event_id):
         if event_id not in ("clicked", "opened"):
@@ -512,15 +533,18 @@ class StatusNotifierTrayIcon:
                 if self.window.keyboard_mode == KEYBOARD_MODE_COMPACT_TV
                 else KEYBOARD_MODE_COMPACT_TV
             ),
+            12: lambda: self.window.set_start_minimized(
+                not self.window.start_minimized
+            ),
         }
         if item_id in actions:
-            GLib.idle_add(actions[item_id])
+            GLib.idle_add(self._run_once, actions[item_id])
             return
 
         layout_index = item_id - self.MENU_LAYOUT_ID_OFFSET
         if 0 <= layout_index < len(self.window.keyboard_layout_choices):
             layout_key = self.window.keyboard_layout_choices[layout_index][0]
-            GLib.idle_add(self.window.set_keyboard_layout, layout_key)
+            GLib.idle_add(self._run_once, self.window.set_keyboard_layout, layout_key)
 
     def toggle_gesture_typing(self):
         if self.window.gesture_enabled:
@@ -906,7 +930,7 @@ class VirtualKeyboard(Gtk.Window):
         if self.get_visible():
             self.hide()
         else:
-            self.show_all()
+            self.show()
             self.present()
             self.request_keep_above()
         self.update_tray_menu()
@@ -1431,7 +1455,11 @@ class VirtualKeyboard(Gtk.Window):
 
     def sync_caps_lock_from_system(self, keymap=None, connect=False):
         try:
-            keymap = keymap or Gdk.Keymap.get_default()
+            if keymap is None:
+                display = self.get_display() or Gdk.Display.get_default()
+                if display is None:
+                    return
+                keymap = Gdk.Keymap.get_for_display(display)
             if keymap is None or not hasattr(keymap, "get_caps_lock_state"):
                 return
             self.set_caps_lock_active(
@@ -1638,7 +1666,13 @@ class VirtualKeyboard(Gtk.Window):
             if self.settings_sync_layout_check is not None:
                 self.settings_sync_layout_check.set_active(self.sync_system_layout)
             if self.settings_layout_combo is not None:
-                self.settings_layout_combo.set_active_id(self.keyboard_layout)
+                if not self.settings_layout_combo.set_active_id(self.keyboard_layout):
+                    active_config = self.keyboard_layouts.get(self.keyboard_layout)
+                    if active_config is not None:
+                        self.settings_layout_combo.append(
+                            self.keyboard_layout, active_config["label"]
+                        )
+                        self.settings_layout_combo.set_active_id(self.keyboard_layout)
             if self.settings_mode_combo is not None:
                 self.settings_mode_combo.set_active_id(self.keyboard_mode)
         finally:
@@ -1741,24 +1775,40 @@ class VirtualKeyboard(Gtk.Window):
         about_dialog.run()
         about_dialog.destroy()
 
-    def on_tray_quit(self, widget):
-        self.exiting = True
+    def cleanup_on_destroy(self):
+        if getattr(self, "_cleaned_up", False):
+            return
+        self._cleaned_up = True
+        self.stop_key_repeat()
+        if self._keep_above_timer_id is not None:
+            GLib.source_remove(self._keep_above_timer_id)
+            self._keep_above_timer_id = None
+        if self.gesture_controller is not None:
+            self.gesture_controller.destroy()
+            self.gesture_controller = None
         self.close_system_layout_sync()
         self.save_settings()
         self.clear_tray_icon()
+
+    def on_tray_quit(self, widget):
+        self.exiting = True
+        self.cleanup_on_destroy()
         self.destroy()
 
     def on_report_bugs(self, widget=None):
         self.open_bug_report_url()
 
     def open_bug_report_url(self):
-        Gio.AppInfo.launch_default_for_uri(BUG_REPORT_URL, None)
+        try:
+            Gio.AppInfo.launch_default_for_uri(BUG_REPORT_URL, None)
+        except GLib.Error as exc:
+            print(f"Warning: Could not open bug report URL ({exc}).")
 
     def on_delete_event(self, widget, event):
         if self.exiting:
             return False
         if self.tray_icon is None:
-            self.close_system_layout_sync()
+            self.cleanup_on_destroy()
             return False
         self.save_settings()
         self.hide()
@@ -1934,9 +1984,12 @@ class VirtualKeyboard(Gtk.Window):
         self.settings_mode_combo = None
 
     def on_settings_prediction_toggled(self, widget):
-        self.set_text_prediction_enabled(widget.get_active())
+        if not self._syncing_settings_dialog:
+            self.set_text_prediction_enabled(widget.get_active())
 
     def on_settings_gesture_toggled(self, widget):
+        if self._syncing_settings_dialog:
+            return
         if widget.get_active():
             self.enable_gesture_typing()
         else:
@@ -1945,10 +1998,12 @@ class VirtualKeyboard(Gtk.Window):
             self.settings_visual_feedback_check.set_sensitive(self.gesture_enabled)
 
     def on_settings_visual_feedback_toggled(self, widget):
-        self.set_gesture_visual_feedback_enabled(widget.get_active())
+        if not self._syncing_settings_dialog:
+            self.set_gesture_visual_feedback_enabled(widget.get_active())
 
     def on_settings_start_minimized_toggled(self, widget):
-        self.set_start_minimized(widget.get_active())
+        if not self._syncing_settings_dialog:
+            self.set_start_minimized(widget.get_active())
 
     def on_settings_sync_layout_toggled(self, widget):
         if not self._syncing_settings_dialog:
@@ -2101,7 +2156,8 @@ class VirtualKeyboard(Gtk.Window):
         return True
 
     def on_window_state_changed(self, widget, event):
-        self.request_keep_above()
+        if (event.new_window_state & Gdk.WindowState.ABOVE) == 0:
+            self.request_keep_above()
         return False
 
     def create_button(
@@ -2160,19 +2216,29 @@ class VirtualKeyboard(Gtk.Window):
             self.text_color = "white"
         self.apply_css()
 
+    @staticmethod
+    def _parse_opacity(value, default=0.90):
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0.05, min(1.0, numeric))
+
     def change_opacity(self, widget, increase_opacity):
+        current = self._parse_opacity(self.opacity)
         if increase_opacity:
-            self.opacity = str(round(min(1.0, float(self.opacity) + 0.01), 2))
+            updated = min(1.0, round(current + 0.01, 2))
         else:
-            self.opacity = str(round(max(0.0, float(self.opacity) - 0.01), 2))
-        self.opacity_btn.set_label(f"{self.opacity}")
+            updated = max(0.05, round(current - 0.01, 2))
+        self.opacity = f"{updated:.2f}"
+        self.opacity_btn.set_label(self.opacity)
         self.apply_css()
 
     def apply_css(self):
         gnome_specific = ""
         if "GNOME" in DESKTOP_ENV:
             gnome_specific = "background-image: none;"
-        theme_opacity = max(0.0, min(1.0, float(self.opacity)))
+        theme_opacity = self._parse_opacity(self.opacity)
         command_modifier_rgb = (
             (0, 0, 0)
             if self.style_variant == "classic" and self.bg_color == "255,0,0"
@@ -3363,11 +3429,15 @@ class VirtualKeyboard(Gtk.Window):
 
     def on_window_button_release_event(self, widget, event):
         self.stop_key_repeat()
+        if self.gesture_controller is not None:
+            self.gesture_controller.cancel_gesture()
         self.schedule_key_button_visual_reset()
         return False
 
     def on_window_leave_notify_event(self, widget, event):
         self.stop_key_repeat()
+        if self.gesture_controller is not None:
+            self.gesture_controller.cancel_gesture()
         self.schedule_key_button_visual_reset()
         return False
 
@@ -3387,14 +3457,17 @@ class VirtualKeyboard(Gtk.Window):
         return False
 
     def stop_key_repeat(self):
-        if hasattr(self, "delay_source"):
-            GLib.source_remove(self.delay_source)
-            del self.delay_source
-        if hasattr(self, "repeat_source"):
-            GLib.source_remove(self.repeat_source)
-            del self.repeat_source
+        delay_source = getattr(self, "delay_source", None)
+        if delay_source is not None:
+            GLib.source_remove(delay_source)
+            self.delay_source = None
+        repeat_source = getattr(self, "repeat_source", None)
+        if repeat_source is not None:
+            GLib.source_remove(repeat_source)
+            self.repeat_source = None
 
     def start_repeat(self, key_event):
+        self.delay_source = None
         self.repeat_source = GLib.timeout_add(100, self.repeat_key, key_event)
         return False
 
@@ -3648,9 +3721,16 @@ class VirtualKeyboard(Gtk.Window):
         try:
             if os.path.exists(self.CONFIG_FILE):
                 self.config.read(self.CONFIG_FILE)
-                self.bg_color = self.config.get("DEFAULT", "bg_color").replace(" ", "")
-                self.opacity = self.config.get("DEFAULT", "opacity")
-                self.text_color = self.config.get("DEFAULT", "text_color", fallback="white")
+                self.bg_color = self.config.get(
+                    "DEFAULT", "bg_color", fallback=self.bg_color
+                ).replace(" ", "")
+                raw_opacity = self.config.get(
+                    "DEFAULT", "opacity", fallback=self.opacity
+                )
+                self.opacity = f"{self._parse_opacity(raw_opacity):.2f}"
+                self.text_color = self.config.get(
+                    "DEFAULT", "text_color", fallback="white"
+                )
                 self.style_variant = self.config.get(
                     "DEFAULT", "style_variant", fallback="classic"
                 )
@@ -3691,8 +3771,12 @@ class VirtualKeyboard(Gtk.Window):
                         fallback=DEFAULT_KEYBOARD_LAYOUT,
                     )
                 )
-                self.width = self.config.getint("DEFAULT", "width", fallback=0)
-                self.height = self.config.getint("DEFAULT", "height", fallback=0)
+                try:
+                    self.width = max(0, self.config.getint("DEFAULT", "width", fallback=0))
+                    self.height = max(0, self.config.getint("DEFAULT", "height", fallback=0))
+                except ValueError:
+                    self.width = 0
+                    self.height = 0
                 pos_x_str = self.config.get("DEFAULT", "pos_x", fallback="0")
                 pos_y_str = self.config.get("DEFAULT", "pos_y", fallback="0")
                 try:
@@ -3704,7 +3788,7 @@ class VirtualKeyboard(Gtk.Window):
                     self.pos_x = self.config_pos_x = 0
                     self.pos_y = self.config_pos_y = 0
 
-        except configparser.Error as exc:
+        except (configparser.Error, ValueError) as exc:
             print(f"Warning: Could not read config file ({exc}). Using default values.")
 
     def save_settings(self):

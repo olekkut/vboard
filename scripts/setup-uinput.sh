@@ -8,6 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UDEV_RULE_SOURCE="$SCRIPT_DIR/../udev/70-vboard-uinput.rules"
 UDEV_RULE_DEST="/etc/udev/rules.d/70-vboard-uinput.rules"
 
+export PATH="/usr/sbin:/sbin:$PATH"
+
 for arg in "$@"; do
   case "$arg" in
     --scope=user|--scope=system|--scope=auto)
@@ -67,15 +69,23 @@ fi
 
 echo "vboard: checking uinput availability"
 
-if ! lsmod | grep -q '^uinput\b'; then
-  modprobe uinput
-  echo "vboard: loaded uinput kernel module"
-else
+if [[ -e /dev/uinput ]]; then
+  echo "vboard: /dev/uinput already present"
+elif command -v lsmod >/dev/null 2>&1 && lsmod | grep -q '^uinput\b'; then
   echo "vboard: uinput module already loaded"
+elif command -v modprobe >/dev/null 2>&1; then
+  if modprobe uinput 2>/dev/null; then
+    echo "vboard: loaded uinput kernel module"
+  else
+    echo "vboard: warning: could not load uinput kernel module (may be built-in or restricted in a container)"
+  fi
+else
+  echo "vboard: warning: modprobe not found; skipping runtime kernel module load"
 fi
 
 if [[ "$SCOPE" == "system" ]]; then
   modules_file="/etc/modules-load.d/uinput.conf"
+  mkdir -p "$(dirname "$modules_file")"
   if [[ ! -f "$modules_file" ]] || ! grep -qx 'uinput' "$modules_file"; then
     echo 'uinput' > "$modules_file"
     echo "vboard: enabled uinput module at boot via $modules_file"
@@ -88,12 +98,10 @@ if [[ -e /dev/uinput ]]; then
   if [[ -r /dev/uinput && -w /dev/uinput ]]; then
     echo "vboard: /dev/uinput is accessible"
   else
-    echo "vboard: /dev/uinput exists but is permission-restricted" >&2
-    exit 1
+    echo "vboard: warning: /dev/uinput exists but is permission-restricted; log out/log in or reboot" >&2
   fi
 else
-  echo "vboard: /dev/uinput not found; ensure kernel supports uinput and module is available" >&2
-  exit 1
+  echo "vboard: warning: /dev/uinput not currently present; reboot or ensure kernel uinput support is enabled"
 fi
 
-echo "vboard: if uinput permissions are not effective yet, log out/log in or restart your computer."
+echo "vboard: if uinput permissions are not effective yet, log out/log in or reboot your computer."

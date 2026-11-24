@@ -1,6 +1,6 @@
 APP_DISPLAY_NAME = "Vboard"
 APP_ID = "io.github.archisman-panigrahi.vboard"
-VERSION = "2.7.3"
+VERSION = "2.7.4"
 
 MODIFIER_KEYS = (
     "Shift_L",

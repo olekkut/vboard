@@ -1,3 +1,15 @@
+vboard (2.7.4-1) unstable; urgency=medium
+
+  * use /usr/bin/python3 shebang and dh_python3 so virtualenvs/pyenv never break GI/uinput imports
+  * fix corrupted StatusNotifierItem DBUS_MENU_XML, GetGroupProperties tuple format, and layout submenu
+  * fix Start Minimized and collapsed headerbar state on startup and Hide/Show toggle
+  * harden install-kwin-rule.sh (create missing ~/.config, KConfig formatting, preserve saved position)
+  * harden setup-uinput.sh to always install udev/modules-load rules and handle containers/built-in uinput
+  * detect Hunspell dictionary charset from sibling .aff SET directive (ISO8859-2 Polish, KOI8-R Russian)
+  * fix key-repeat GLib-CRITICAL source removal, Gdk.Keymap deprecation, opacity formatting, and settings fallbacks
+
+ -- Aleksander Kutycki <74899889+olekkut@users.noreply.github.com>  Tue, 24 Nov 2026 21:40:00 +0000
+
 vboard (2.7.3-1) unstable; urgency=medium
 
   * fix dual active button glow when switching to a layout not in Plasma
